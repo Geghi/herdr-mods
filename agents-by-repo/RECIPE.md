@@ -1,7 +1,7 @@
 # Agents by repo
 
 The agents list, grouped so you always know what each agent is working on: by machine, then by
-the main repository, with the worktree and branch of each agent on its second line.
+the main repository, one compact line per agent named after the branch it is on.
 
 ![Agents by repo](preview.png)
 
@@ -12,10 +12,10 @@ the main repository, with the worktree and branch of each agent on its second li
   status.
 - **Project headers** under each machine: the main repo's name (the main checkout, not the worktree),
   its branch and the agent count. Spaces that aren't in a git repo get their own header.
-- **Agent rows**, two lines:
-  - first line: the agent icon, its title, how long it has been in its state, and a status dot
-    (working, done, blocked, idle);
-  - second line, dimmed: `↳ worktree-space · ⎇ branch · parent/folder`.
+- **Agent rows**, one line, 30 px: the agent icon, then its branch with a ⎇ icon when the agent's
+  pane is on a branch other than `main`/`master`, else its tab or title. On the right, how long it
+  has been in its state and a status dot (working, done, blocked, idle). Hovering shows a tooltip
+  with title · space · branch · folder.
 - A sort menu (clock icon): "Most urgent first" (blocked and done on top) or "Space order".
 
 ## How it behaves
@@ -32,7 +32,7 @@ the main repository, with the worktree and branch of each agent on its second li
 ## Built from
 
 - A clone of herdr's shipped `agents` mod (`mod.json` keeps `cloned_from`). The changes are in
-  `render` (machine and project grouping, the second line) plus `repoOf`, `groupSpace`, `familyOf`.
+  `render` (machine and project grouping, the one-line rows) plus `repoOf`, `groupSpace`, `familyOf`.
 - `mod.json`: `"place": "none"`. Put it in your layout in place of the `agents` block
   (`"mod": "agents"` → `"mod": "my-agents"`).
 
@@ -40,10 +40,11 @@ the main repository, with the worktree and branch of each agent on its second li
 
 - Runs `git` in each space's folder, on that space's machine.
 - A machine that's away keeps its last known grouping until it answers again.
-- Icons come from the shipped `workspace-chrome` mod (`mods/workspace-chrome/chevron-*.svg`).
+- Icons come from the shipped `workspace-chrome` mod (`chevron-*.svg`, `branch.svg`).
 
 ## Done when
 
 - With agents on two machines, each machine has its own header.
-- An agent in a worktree of repo X shows under X's header with `↳ <worktree>` on its second line.
+- An agent in a worktree of repo X shows under X's header, named after the worktree's branch.
+- An agent on `main` shows its tab name instead.
 - Folding a machine hides its projects and agents.

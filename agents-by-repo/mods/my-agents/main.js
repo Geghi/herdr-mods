@@ -423,20 +423,21 @@ export default class Agents extends View {
           cx.notify();
         })
         .child(svg(`mods/workspace-chrome/${isPinned ? "pin-off" : "pin"}.svg`).size(13));
-      // Line 1: what the agent is on (its tab or title). Line 2: where (branch · folder),
-      // with the space name too in the Pinned group, which has no space header.
+      // One line: the agent's branch when it is on one other than main/master, else its tab or title.
+      // The rest (title, space, folder) is in the tooltip.
       const pane = paneById.get(a.pane), sp = spaceById.get(a.space);
       const raw = label(a);
-      const name = /^\d+$/.test(raw) ? `${a.program?.name || "Agent"} · tab ${raw}` : raw || a.program?.name || a.address;
+      const title = /^\d+$/.test(raw) ? `${a.program?.name || "Agent"} · tab ${raw}` : raw || a.program?.name || a.address;
       const branch = pane?.branch || sp?.branch || "";
+      const onBranch = Boolean(branch) && !/^(main|master)$/.test(branch);
+      const name = onBranch ? branch : title;
       const folder = shortFolder(pane?.cwd || sp?.folder);
-      const fam = this.family?.info.get(a.space), mainId = fam ? this.family.mainOf.get(fam.repo) : a.space;
-      const sub = !isPinned && mainId && a.space !== mainId ? (sp?.name || a.space_name || "") : "";
-      const where = [isPinned ? (a.space_name || "") : "", sub ? `↳ ${sub}` : "", branch && branch !== sub ? `⎇ ${branch}` : "", folder].filter(Boolean).join("  ·  ");
+      const where = [onBranch ? title : "", a.space_name || "", branch ? `⎇ ${branch}` : "", folder].filter(Boolean).join("  ·  ");
       return h_flex()
         .id(`ag-${a.address}`)
+        .tooltip(where)
         .px(8)
-        .h(42)
+        .h(30)
         .flex_none()
         .rounded(8)
         .items_center()
@@ -456,9 +457,9 @@ export default class Agents extends View {
             this.folded.has(a.address) ? this.folded.delete(a.address) : this.folded.add(a.address);
             cx.notify();
           })).child(pic)))
-        .child(v_flex().flex_1().min_w(0).gap(1).items_stretch()
-          .child(div().w_full().min_w(0).truncate().text_size(12.8).text_color(idle ? t.muted : t.foreground).child(name))
-          .when(Boolean(where), el => el.child(div().w_full().min_w(0).truncate().text_size(11).text_color(t.dim).child(where))))
+        .child(h_flex().flex_1().min_w(0).gap(5).items_center()
+          .when(onBranch, el => el.child(svg("mods/workspace-chrome/branch.svg").size(12).flex_none().text_color(t.dim)))
+          .child(div().min_w(0).truncate().text_size(12.8).text_color(idle ? t.muted : t.foreground).child(name)))
         .when(subs.length > 0, el => el.child(fold(a, subs)))
         .when(this.hovered === a.address, el => el.child(pin))
         .when(this.hovered !== a.address && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))

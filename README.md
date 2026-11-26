@@ -17,9 +17,10 @@ Tell your agent:
 ## Keeping several machines in sync
 
 `sync/` has the scripts used to keep these mods identical on a Windows and a Linux machine.
-Clone the repo, link each `mods/<name>` folder into `~/.config/herdr-app/mods/` (a junction on
-Windows, a symlink on Linux), then run `sync/herdr-sync.ps1` or `sync/herdr-sync.sh` every few
-minutes. They commit local changes, `pull --rebase` and push. On a conflict they stop and write
-`sync/last-error.log` instead of pushing.
+Clone the repo on each machine and run `sync/herdr-sync.ps1` or `sync/herdr-sync.sh` every few
+minutes. They copy the live mods from `~/.config/herdr-app/mods` into the repo, commit,
+`pull --rebase` and push, then copy the result back so herdr hot-reloads it. (Linking the folders
+instead doesn't work: herdr's hot reload doesn't see changes behind a junction or symlink.)
+On a conflict they stop and write `sync/last-error.log` instead of pushing.
 
 The screenshots in each folder are taken from this repository.
