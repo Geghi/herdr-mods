@@ -978,7 +978,7 @@ export default class Code extends View {
     Object.assign(fl, { root, on, loading: true, error: null });
     cx.spawn(async cx => {
       try {
-        const list = await listFiles(root, on, Boolean(this.repo));
+        const list = await listFiles(root, on);
         if (fl.root === root && fl.on === on) { fl.list = list; fl.at = Date.now(); this.qoMemo = null; }
       } catch (e) { fl.error = String(e.message ?? e).slice(0, 200); }
       finally { fl.loading = false; cx.notify(); }
@@ -1138,7 +1138,7 @@ export default class Code extends View {
     const f = this.grep, q = this.findQuery.value(), n = ++f.seq;
     if (!q || !this.root) { f.results = null; f.error = null; f.loading = false; cx.notify(); return; }
     const o = { query: q, matchCase: f.matchCase, word: f.word, regex: f.regex, ignore: f.ignore,
-      include: this.findInclude.value(), exclude: this.findExclude.value(), inRepo: Boolean(this.repo) };
+      include: this.findInclude.value(), exclude: this.findExclude.value() };
     const root = this.root, on = this.on, t0 = Date.now();
     f.loading = true; f.error = null; this.persist(); cx.notify();
     cx.spawn(async cx => {
@@ -1200,10 +1200,11 @@ export default class Code extends View {
           toggle("f-ignore", ".gi", "ignore", "Skip files listed in .gitignore")]))));
 
     const status = f.loading ? "Searching…" : f.error ? null : !r ? (this.root ? "Type to search the whole folder" : "No folder")
-      : !r.total ? "No results" : `${r.total}${r.limited ? "+" : ""} result${r.total === 1 ? "" : "s"} in ${r.files.length} file${r.files.length === 1 ? "" : "s"}`;
+      : r.notRepo ? null : !r.total ? "No results" : `${r.total}${r.limited ? "+" : ""} result${r.total === 1 ? "" : "s"} in ${r.files.length} file${r.files.length === 1 ? "" : "s"}`;
     const info = v_flex().flex_none().px(12).pb(6).gap(2).text_size(11)
       .when(Boolean(status), el => el.child(div().text_color(t.dim).child(status)))
       .when(Boolean(f.error), el => el.child(div().text_color(t.ansi1).child(f.error)))
+      .when(Boolean(r?.notRepo) && !f.loading, el => el.child(div().text_color(t.ansi3).child("This folder isn't a git repo, so search is off here: searching a whole folder like your home would read every file. Open a space on a project (Ctrl+P still finds files by name).")))
       .when(Boolean(r?.limited) && !f.loading, el => el.child(div().text_color(t.ansi3).child("Too many results: showing the first ones. Narrow the search.")));
 
     const rows = [];

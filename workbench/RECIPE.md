@@ -60,7 +60,8 @@ the space you are in, on this computer or on an ssh machine.
   before the file is replaced.
 - **Ctrl+P** (Go to file): a 600 px box at the top center with a field and up to 60 files. With no
   text, open files come first. Typing fuzzy-matches the repo's files (`git ls-files` tracked +
-  untracked, or the folder's text files outside a repo), preferring the file name, runs and word
+  untracked; outside a repo only file names, at most 20,000 and 8 levels deep, skipping
+  node_modules, AppData, .cache and similar: `find | head` or a .NET walk on Windows), preferring the file name, runs and word
   starts; matched letters are accent and bold, the folder is dim. ↑/↓ move, Enter or a click opens,
   Esc or a click outside closes, `name:42` opens at line 42.
 - **Ctrl+ù** (and Ctrl+/) toggles a line comment on the line or the selected lines: `//`, `#`, `--`,
@@ -77,8 +78,10 @@ the space you are in, on this computer or on an ssh machine.
 - Sidebar width, view, tree/list mode and open files are kept per space.
 - `tab.new` props: `open` (a path or a list of paths, relative to the space folder) opens files, and
   `view` (`explorer`, `changes`, `compare`, `graph`) picks the starting view.
-- Search runs `git grep -n --column -I` in the space folder (`--untracked` in a repo, `--no-index`
-  elsewhere), on the space's machine; regex mode is `-P`, falling back to `-E`. Up to 200 matches per
+- Search runs `git grep -n --column -I --untracked` in the space folder, on the space's machine;
+  regex mode is `-P`, falling back to `-E`. Outside a git repo it doesn't run and says why:
+  `git grep --no-index` walks the whole tree whatever `--max-depth` says (a home folder took
+  minutes and hundreds of MB), and `exec`'s timeout stops waiting but doesn't kill the process. Up to 200 matches per
   file and 5000 in all, 2500 rows drawn. The `find` prop (`tab.new` props) opens Search with that text.
 - New files and folders are made with `sh` (`mkdir -p`, `set -C`), or PowerShell on Windows and on ssh machines without `sh`; an existing name is never overwritten.
 - Other mods can open a file in it: `setShared("code.open", {space, root, on, path, n: Date.now()})`, then select or

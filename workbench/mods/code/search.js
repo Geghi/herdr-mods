@@ -1,6 +1,6 @@
 // Search in files with `git grep`: fast, the same on this computer and on ssh machines, honours
 // .gitignore, and with --no-index also works in folders that aren't a git repo.
-import { exec } from "herdr";
+import { exec, window as hwin } from "herdr";
 
 export const MAX_MATCHES = 5000;   // rows kept for the list
 const PER_FILE = 200;              // matches per file asked of git
@@ -45,18 +45,30 @@ function ranges(re, text, fallbackCol, len) {
   return out;
 }
 
-// o: { query, matchCase, word, regex, include, exclude, ignore, inRepo }
-// -> { files: [{ path, matches: [{ line, text, start, end }] }], total, limited }
+// Folders never worth walking outside a repo (in a repo, .gitignore decides).
+const HEAVY = ["node_modules", ".git", "dist", "build", ".next", "target", "vendor", ".venv", "venv", "__pycache__", ".cache",
+  "AppData", "Library", ".npm", ".pnpm-store", ".cargo", ".rustup", ".gradle", ".m2", ".nuget", ".local", "go", "snap", ".Trash"];
+const NOT_REPO = /not a git repository|outside repository|--no-index/i;
+
+// o: { query, matchCase, word, regex, include, exclude, ignore }
+// -> { files: [{ path, matches: [{ line, text, start, end }] }], total, limited, shallow }
+// Tracked + untracked files of the repo the folder is in; { notRepo: true } outside a repo.
 export async function searchFiles(root, on, o) {
-  const args = ["-c", "core.quotepath=off", "grep", "-n", "--column", "-I", "--no-color", "-m", String(PER_FILE)];
-  if (o.inRepo) { args.push("--untracked"); if (!o.ignore) args.push("--no-exclude-standard"); }
-  else { args.push("--no-index"); if (o.ignore) args.push("--exclude-standard"); }
-  if (!o.matchCase) args.push("-i");
-  if (o.word) args.push("-w");
-  const tail = ["-e", o.query, "--", ...(pathspecs(o.include, false).length ? pathspecs(o.include, false) : ["."]), ...pathspecs(o.exclude, true)];
-  const run = mode => exec("git", [...args, mode, ...tail], { cwd: root, on, timeout: 30000 });
-  let r = await run(o.regex ? "-P" : "-F");
-  if (o.regex && r.code > 1 && /PCRE|perl/i.test(r.stderr)) r = await run("-E");   // git built without PCRE
+  const base = ["-c", "core.quotepath=off", "grep", "-n", "--column", "-I", "--no-color", "-m", String(PER_FILE)];
+  if (!o.matchCase) base.push("-i");
+  if (o.word) base.push("-w");
+  const inc = pathspecs(o.include, false), exc = pathspecs(o.exclude, true);
+  const run = (scope, mode) => exec("git", [...base, ...scope, mode, "-e", o.query, "--", ...(inc.length ? inc : ["."]), ...exc,
+  ], { cwd: root, on, timeout: 30000 });
+  const attempt = async scope => {
+    let r = await run(scope, o.regex ? "-P" : "-F");
+    if (o.regex && r.code > 1 && /PCRE|perl/i.test(r.stderr)) r = await run(scope, "-E");   // git built without PCRE
+    return r;
+  };
+  // Outside a repo git grep --no-index walks the whole tree whatever the depth (a home folder takes
+  // minutes and lots of memory), so search only runs inside a repo.
+  const r = await attempt(["--untracked", ...(o.ignore ? [] : ["--no-exclude-standard"])]);
+  if (r.code > 1 && NOT_REPO.test(r.stderr)) return { files: [], total: 0, limited: false, notRepo: true };
   if (r.code > 1) throw new Error((r.stderr || "Search failed").trim().split("\n").slice(0, 2).join(" "));
   const re = matcher(o), files = [], byPath = new Map();
   let total = 0, limited = false;
@@ -81,19 +93,39 @@ export async function searchFiles(root, on, o) {
 
 // ---- quick open (Ctrl+P) ----
 
-const HEAVY = ["node_modules", ".git", "dist", "build", ".next", "target", "vendor", ".venv", "venv", "__pycache__", ".cache"];
+export const MAX_FILES = 20000;
+const WALK_DEPTH = 8;
 
-// Every file under root, relative: git's list in a repo (tracked + untracked, not ignored),
-// else the text files git can see there, skipping the usual heavy folders.
-export async function listFiles(root, on, inRepo) {
-  if (inRepo) {
-    const r = await exec("git", ["-c", "core.quotepath=off", "ls-files", "--cached", "--others", "--exclude-standard"], { cwd: root, on, timeout: 30000 });
-    if (r.code === 0) return [...new Set(r.stdout.split("\n").map(s => s.replace(/\r$/, "")).filter(Boolean))];
+// Every file under root, relative. In a repo: git's list (tracked + untracked, not ignored).
+// Elsewhere: file NAMES only (never contents), at most MAX_FILES and WALK_DEPTH levels, skipping HEAVY.
+export async function listFiles(root, on) {
+  const g = await exec("git", ["-c", "core.quotepath=off", "ls-files", "--cached", "--others", "--exclude-standard"], { cwd: root, on, timeout: 30000 });
+  if (g.code === 0) return [...new Set(g.stdout.split("\n").map(s => s.replace(/\r$/, "")).filter(Boolean))].slice(0, MAX_FILES * 5);
+  const windows = async () => {
+    const skip = HEAVY.map(h => `'${h}'`).join(",");
+    const script = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); & { param($root) " +
+      `$skip = [Collections.Generic.HashSet[string]]::new([string[]]@(${skip}), [StringComparer]::OrdinalIgnoreCase); ` +
+      "$q = [Collections.Generic.Queue[object]]::new(); $q.Enqueue(@($root, 0)); $n = 0; $out = [Text.StringBuilder]::new(); " +
+      `while ($q.Count -and $n -lt ${MAX_FILES}) { $d = $q.Dequeue(); ` +
+      "try { foreach ($f in [IO.Directory]::EnumerateFiles($d[0])) { [void]$out.Append($f.Substring($root.Length + 1)).Append(\"`n\"); $n++; " +
+      `if ($n -ge ${MAX_FILES}) { break } } } catch {} ` +
+      `if ($d[1] -lt ${WALK_DEPTH}) { try { foreach ($s in [IO.Directory]::EnumerateDirectories($d[0])) { $name = [IO.Path]::GetFileName($s); ` +
+      "if (-not $skip.Contains($name) -and -not (([IO.File]::GetAttributes($s)) -band [IO.FileAttributes]::ReparsePoint)) { $q.Enqueue(@($s, $d[1] + 1)) } } } catch {} } } " +
+      "[Console]::Out.Write($out.ToString()) }";
+    const r = await exec("powershell", ["-NoProfile", "-Command", `${script} '${root.replace(/'/g, "''")}'`], { on, timeout: 30000 });
+    if (r.code !== 0) throw new Error((r.stderr || "Can't list the files").trim().split("\n")[0]);
+    return r.stdout.split("\n").map(s => s.replace(/\r$/, "").replace(/\\/g, "/")).filter(Boolean);
+  };
+  if (!on && hwin()?.platform === "windows") return windows();
+  const prune = HEAVY.map(h => `-name '${h}'`).join(" -o ");
+  let r;
+  try {
+    r = await exec("sh", ["-c", `cd "$1" && find . -maxdepth ${WALK_DEPTH} \\( ${prune} \\) -prune -o -type f -print 2>/dev/null | head -n ${MAX_FILES}`, "list", root], { on, timeout: 30000 });
+  } catch (e) {
+    if (on && String(e).includes("program not found")) return windows();
+    throw e;
   }
-  const r = await exec("git", ["-c", "core.quotepath=off", "grep", "--no-index", "--exclude-standard", "-l", "-I", "-e", "", "--", ".",
-    ...HEAVY.flatMap(h => [`:(exclude,glob)**/${h}`, `:(exclude,glob)**/${h}/**`])], { cwd: root, on, timeout: 30000 });
-  if (r.code > 1) throw new Error((r.stderr || "Can't list the files").trim().split("\n")[0]);
-  return r.stdout.split("\n").map(s => s.replace(/\r$/, "")).filter(Boolean);
+  return r.stdout.split("\n").map(s => s.replace(/^\.\//, "")).filter(Boolean);
 }
 
 const WORD = /[\/\._\-\s]/;
