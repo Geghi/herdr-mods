@@ -36,6 +36,24 @@ async function directory(path, on) {
   return out;
 }
 
+// ---- new files and folders (fails if the name is taken; parent folders are made as needed) ----
+async function createEntry(path, folder, on) {
+  const windows = async () => {
+    const r = await exec("powershell", ["-NoProfile", "-Command", "& { param($p, $d) if (Test-Path -LiteralPath $p) { throw 'Already exists' }; if ($d -eq 'd') { [void][IO.Directory]::CreateDirectory($p) } else { [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($p)); [IO.File]::WriteAllBytes($p, [byte[]]@()) } } " + psQuote(path) + (folder ? " d" : " f")], { on });
+    if (r.code !== 0) throw new Error(r.stderr.trim().split(/\r?\n/)[0] || "Couldn't create it");
+  };
+  if (!on && hwin()?.platform === "windows") return windows();
+  const script = 'if [ -e "$1" ] || [ -L "$1" ]; then echo "Already exists" >&2; exit 1; fi; ' +
+    'if [ "$2" = d ]; then mkdir -p -- "$1"; else mkdir -p -- "$(dirname -- "$1")" && set -C && : > "$1"; fi';
+  let r;
+  try { r = await exec("sh", ["-c", script, "code", path, folder ? "d" : "f"], { on }); }
+  catch (e) {
+    if (on && String(e).includes("program not found")) return windows();
+    throw e;
+  }
+  if (r.code !== 0) throw new Error(r.stderr.trim().split("\n")[0] || "Couldn't create it");
+}
+
 // ---- saving ----
 const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 function utf8Base64(text) {
@@ -114,6 +132,10 @@ export default class Code extends View {
     this.picker = null;
     this.commitMsg = InputState.new({ placeholder: "Commit message (commits all changes)" });
     this.commitMsg.on("submit", (_e, cx) => this.commitAll(cx));
+    this.treeSel = null; this.creating = null;          // explorer selection { rel, dir }; new entry { kind, dir, busy, error }
+    this.newName = InputState.new({ placeholder: "Name (a/b.txt makes folders)" });
+    this.newName.on("submit", (_e, cx) => this.finishCreate(cx));
+    this.newName.on("blur", (_e, cx) => this.cancelCreate(cx));
     this.pickerFilter = InputState.new({ placeholder: "Filter branches…" });
     this.pickerFilter.on("change", (_e, cx) => cx.notify());
     this.graphScroll = VirtualListScrollHandle.new();
@@ -586,8 +608,78 @@ export default class Code extends View {
     this.persist(); cx.notify();
   }
 
+  // The folder a new entry goes in: the selected folder, else the selected file's folder, else the root.
+  targetDir() {
+    const s = this.treeSel;
+    if (!s) return "";
+    return s.dir ? s.rel : s.rel.includes("/") ? s.rel.slice(0, s.rel.lastIndexOf("/")) : "";
+  }
+
+  startCreate(kind, cx) {
+    if (!this.root) return;
+    const dir = this.targetDir();
+    this.view = "explorer"; this.sidebar = true;
+    this.creating = { kind, dir, busy: false, error: null };
+    if (dir && !this.folders.has(dir)) { this.folders.add(dir); this.loadFolder(dir, cx); this.persist(); }
+    this.newName.set_value(""); this.newName.focus(); cx.notify();
+    cx.timer.after(50, () => { if (this.creating) this.newName.focus(); });   // the field exists only from the next frame
+  }
+
+  cancelCreate(cx) {
+    if (!this.creating || this.creating.busy) return;
+    this.creating = null; cx.notify();
+  }
+
+  finishCreate(cx) {
+    const c = this.creating;
+    if (!c || c.busy) return;
+    const name = this.newName.value().trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    if (!name) { this.cancelCreate(cx); return; }
+    if (name.split("/").some(p => !p || p === "." || p === "..") || /[\0:*?"<>|]/.test(name)) {
+      c.error = "Not a valid name"; cx.notify(); return;
+    }
+    const rel = c.dir ? `${c.dir}/${name}` : name, abs = `${this.root}/${rel}`, on = this.on, root = this.root;
+    c.busy = true; c.error = null; cx.notify();
+    cx.spawn(async cx => {
+      try {
+        await createEntry(abs, c.kind === "folder", on);
+        if (root !== this.root || on !== this.on) return;
+        this.creating = null;
+        const parts = rel.split("/"), dirs = new Set([c.dir]);
+        for (let i = 1; i < parts.length + (c.kind === "folder" ? 1 : 0); i++) {
+          const f = parts.slice(0, i).join("/");
+          this.folders.add(f); dirs.add(f);
+        }
+        for (const d of dirs) this.loadFolder(d, cx);
+        this.treeSel = { rel, dir: c.kind === "folder" };
+        this.message = `Created ${name}`; this.persist();
+        if (c.kind === "file") this.open(abs, on, cx, true);
+        this.loadWork(cx);
+      } catch (e) {
+        c.busy = false; c.error = String(e.message ?? e).slice(0, 160); this.newName.focus();
+      } finally { cx.notify(); }
+    });
+  }
+
+  newRow(depth, t) {
+    const c = this.creating, folder = c.kind === "folder";
+    const row = h_flex().id("tree-new").h(26).flex_none().pl(6 + depth * 14).pr(6).gap(4).items_center()
+      .child(div().w(11).flex_none())
+      .child(div().w(26).flex_none().flex().justify_center()
+        .child(svg(`mods/code/${folder ? "folder" : "file"}.svg`).size(14).text_color(folder ? t.accent : t.dim)))
+      .child(div().id("tree-new-box").flex_1().min_w(0).h(22).px(6).flex().items_center().rounded(4).bg(t.background)
+        .border_1().border_color(c.error ? t.ansi1 : t.accent)
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_key_down((e, cx) => { if (e.key === "escape") { cx.stop_propagation(); this.cancelCreate(cx); } })
+        .child(Input.new(this.newName).h_full().w_full().text_size(12).text_color(t.foreground)));
+    if (!c.error) return [row];
+    return [row, div().id("tree-new-err").flex_none().ml(6 + depth * 14 + 41).mr(6).mb(2).px(6).py(2).rounded(4)
+      .text_size(11).bg(t.raised).text_color(t.ansi1).child(c.error)];
+  }
+
   setRoot(root, on, cx) {
     if (root === this.root && on === this.on) return;
+    this.creating = null; this.treeSel = null;
     this.root = root; this.on = on; this.repo = null; this.work.note = null;
     this.folders = new Set(); this.loadTree(cx); this.loadRepo(cx); this.persist();
   }
@@ -806,12 +898,15 @@ export default class Code extends View {
   explorerRows(prefix, depth, out, t) {
     if (depth > 30) return out;
     const current = this.docs[this.active];
+    if (this.creating?.dir === prefix) out.push(...this.newRow(depth, t));
     for (const entry of this.entries.get(prefix) ?? []) {
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(rel);
-      const abs = `${this.root}/${rel}`, selected = current?.kind === "file" && current.path === abs && current.on === this.on;
+      const abs = `${this.root}/${rel}`;
+      const selected = entry.dir ? this.treeSel?.dir === true && this.treeSel.rel === rel
+        : current?.kind === "file" && current.path === abs && current.on === this.on;
       out.push(h_flex().id(`tree-${rel}`).h(24).flex_none().pl(6 + depth * 14).pr(6).gap(4).items_center().rounded(5).cursor_pointer()
         .bg(selected ? t.selected : t.chrome).hover(s => s.bg(selected ? t.selected : t.hover))
-        .on_click((_e, cx) => entry.dir ? this.toggle(rel, cx) : this.open(abs, this.on, cx, true))
+        .on_click((_e, cx) => { this.treeSel = { rel, dir: entry.dir }; entry.dir ? this.toggle(rel, cx) : this.open(abs, this.on, cx, true); })
         .child(entry.dir ? svg(`mods/code/chevron-${open ? "down" : "right"}.svg`).size(11).flex_none().text_color(t.dim) : div().w(11).flex_none())
         .child(entry.dir ? div().w(26).flex_none().flex().justify_center().child(svg("mods/code/folder.svg").size(14).text_color(t.accent)) : this.badge(entry.name))
         .child(div().flex_1().min_w(0).truncate().text_color(selected ? t.foreground : t.muted).child(entry.name)));
@@ -822,7 +917,10 @@ export default class Code extends View {
 
   sideExplorer(t) {
     return v_flex().flex_1().min_h(0)
-      .child(this.section(t, `EXPLORER · ${this.root ? base(this.root) || this.root : ""}`))
+      .child(this.section(t, `EXPLORER · ${this.root ? base(this.root) || this.root : ""}`, this.root ? [
+        this.iconBtn(t, "new-file", "file-plus", "New file…", cx => this.startCreate("file", cx)),
+        this.iconBtn(t, "new-folder", "folder-plus", "New folder…", cx => this.startCreate("folder", cx)),
+        this.iconBtn(t, "tree-refresh", "refresh", "Refresh", cx => this.loadTree(cx))] : []))
       .child(v_flex().id("tree").flex_1().min_h(0).overflow_y_scrollbar().px(4).pb(6).text_size(13).children(this.explorerRows("", 0, [], t))
         .when(Boolean(this.treeError) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim)
           .child(this.treeError || (this.root ? "Loading…" : "No folder")))));

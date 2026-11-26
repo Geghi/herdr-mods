@@ -14,7 +14,11 @@ the space you are in, on this computer or on an ssh machine.
 - **Sidebar** (default 300 px, drag its right edge to resize, drag below 120 px to hide it, double-click
   the edge to reset):
   - **Explorer:** a lazy file tree of the space's folder. Each file has a small colored badge for its
-    type (TS, JS, PY, MD, JSON…).
+    type (TS, JS, PY, MD, JSON…). The header has New file, New folder and Refresh buttons. New
+    file/folder puts a name field (accent border) at the top of the selected folder, or of the
+    selected file's folder, or of the root. Enter creates it (`a/b.txt` also makes the folders),
+    Escape or clicking away cancels, and a taken name shows "Already exists" in red under the field.
+    A new file opens in the editor.
   - **Changes:** a commit message box, a Commit button (staged files only if any are staged, else
     everything), and a ↓ Pull button (fast-forward only). Below them, STAGED CHANGES and CHANGES
     sections, shown as a folder tree or a flat list. Each row shows a status letter (M/A/D/R/U)
@@ -55,6 +59,7 @@ the space you are in, on this computer or on an ssh machine.
 - Sidebar width, view, tree/list mode and open files are kept per space.
 - `tab.new` props: `open` (a path or a list of paths, relative to the space folder) opens files, and
   `view` (`explorer`, `changes`, `compare`, `graph`) picks the starting view.
+- New files and folders are made with `sh` (`mkdir -p`, `set -C`), or PowerShell on Windows and on ssh machines without `sh`; an existing name is never overwritten.
 - Other mods can open a file in it: `setShared("code.open", {space, root, on, path, n: Date.now()})`, then select or
   create the Editor tab (see the files-to-editor mod).
 
