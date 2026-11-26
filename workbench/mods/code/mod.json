@@ -1,0 +1,20 @@
+{
+  "place": "none",
+  "palette": [
+    {
+      "title": "Open editor",
+      "command": "tab.new",
+      "args": {
+        "name": "Editor",
+        "mod": "code"
+      },
+      "words": "code edit files vscode"
+    },
+    {
+      "title": "Git: Pull",
+      "command": "code.pull",
+      "words": "editor source control update upstream"
+    }
+  ],
+  "focusable": true
+}

@@ -1,0 +1,7 @@
+# written by herdr-app into every mod folder
+gpui-kit.d.ts
+jsconfig.json
+# temporary files from saves and syncs
+*.sync.*
+*.herdr-save-*
+sync/last-error.log
