@@ -1,11 +1,21 @@
 {
   "global": {
-    "ctrl-shift-y": { "command": "tab.new", "args": { "name": "Editor", "mod": "code", "props": { "dedupe": true } } }
+    "ctrl-shift-y": {
+      "command": "tab.new",
+      "args": {
+        "name": "Editor",
+        "mod": "code",
+        "props": {
+          "dedupe": true
+        }
+      }
+    }
   },
   "mod:code": {
     "ctrl-s": "code.save",
     "ctrl-w": "code.close",
     "ctrl-f4": "code.close",
-    "ctrl-b": "code.explorer"
+    "ctrl-b": "code.explorer",
+    "ctrl-shift-f": "code.search"
   }
 }

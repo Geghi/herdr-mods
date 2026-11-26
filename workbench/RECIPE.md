@@ -19,6 +19,15 @@ the space you are in, on this computer or on an ssh machine.
     selected file's folder, or of the root. Enter creates it (`a/b.txt` also makes the folders),
     Escape or clicking away cancels, and a taken name shows "Already exists" in red under the field.
     A new file opens in the editor.
+  - **Search** (Ctrl+Shift+F in the Editor, or "Search in files" in the palette): a search field
+    with three toggles inside (Aa match case, ab whole word, .* regular expression), and under a
+    chevron "files to include" and "files to exclude" (comma-separated: `*.ts, src/api`,
+    `node_modules, dist`; a bare name matches at any depth, folder or file) with a .gi toggle
+    for skipping .gitignored files. Results come 350 ms after typing: "N results in M files",
+    then a folder tree (single-child chains as `a/b/c`) or a flat list, each file with its match
+    count and each match as a row with ~16 characters before it, the match highlighted and the line
+    number. Clicking a match opens the file with the match selected. Header buttons: search again,
+    tree/list, collapse/expand all, clear. A selected word in the open file pre-fills the field.
   - **Changes:** a commit message box, a Commit button (staged files only if any are staged, else
     everything), and a ↓ Pull button (fast-forward only). Below them, STAGED CHANGES and CHANGES
     sections, shown as a folder tree or a flat list. Each row shows a status letter (M/A/D/R/U)
@@ -59,6 +68,9 @@ the space you are in, on this computer or on an ssh machine.
 - Sidebar width, view, tree/list mode and open files are kept per space.
 - `tab.new` props: `open` (a path or a list of paths, relative to the space folder) opens files, and
   `view` (`explorer`, `changes`, `compare`, `graph`) picks the starting view.
+- Search runs `git grep -n --column -I` in the space folder (`--untracked` in a repo, `--no-index`
+  elsewhere), on the space's machine; regex mode is `-P`, falling back to `-E`. Up to 200 matches per
+  file and 5000 in all, 2500 rows drawn. The `find` prop (`tab.new` props) opens Search with that text.
 - New files and folders are made with `sh` (`mkdir -p`, `set -C`), or PowerShell on Windows and on ssh machines without `sh`; an existing name is never overwritten.
 - Other mods can open a file in it: `setShared("code.open", {space, root, on, path, n: Date.now()})`, then select or
   create the Editor tab (see the files-to-editor mod).
@@ -68,8 +80,8 @@ the space you are in, on this computer or on an ssh machine.
 - `mods/code/main.js` (the `View`), `git.js` (git commands, diff rows, graph lanes, file trees),
   `icons.js` (file-type badges), `langs.js` (file name to syntax), plus lucide-style SVG icons.
 - `mod.json`: `"place": "none"`, `"focusable": true`, palette entries "Open editor" (`tab.new` with
-  `mod: "code"`) and "Git: Pull" (`code.pull`).
-- `keys.json`: the global Ctrl+Shift+Y and the `mod:code` section.
+  `mod: "code"`), "Git: Pull" (`code.pull`) and "Search in files" (`code.search`).
+- `keys.json`: the global Ctrl+Shift+Y and the `mod:code` section (Ctrl+Shift+F is `code.search` there).
 - gpui-base: `Editor`/`EditorState`, `Input`/`InputState`, `v_virtual_list` for long lists and the
   graph.
 

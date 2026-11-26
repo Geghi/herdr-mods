@@ -5,6 +5,7 @@ import { v_flex, h_flex, Editor, EditorState, InputState, Input, Scrollbar, v_vi
 import { spaces, panes, focused, run, home, exec, readTextFile, writeTextFile, theme, settings, window as hwin, props, shared, nextCommand, checking } from "herdr";
 import { gitIn, repoRoot, branches, workingChanges, pull, stage, unstage, discard, changedFiles, mergeBase, aheadBehind, fileDiff, unifiedRows, splitRows, textAsAdded, commits, layoutGraph, buildTree, relTime, EMPTY_TREE } from "./git.js";
 import { fileIcon } from "./icons.js";
+import { searchFiles } from "./search.js";
 import { languageOf } from "./langs.js";
 
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", cjs: "js", toml: "yaml", yml: "yaml", jsonc: "json", svelte: "html", vue: "html", htm: "html", md: "markdown" };
@@ -107,6 +108,7 @@ async function saveRemote(path, text, on) {
 
 const VIEWS = [
   { id: "explorer", label: "Explorer", icon: "files" },
+  { id: "search", label: "Search", icon: "search" },
   { id: "changes", label: "Changes", icon: "git-branch" },
   { id: "compare", label: "Compare", icon: "git-compare" },
   { id: "graph", label: "History", icon: "git-graph" },
@@ -136,6 +138,16 @@ export default class Code extends View {
     this.newName = InputState.new({ placeholder: "Name (a/b.txt makes folders)" });
     this.newName.on("submit", (_e, cx) => this.finishCreate(cx));
     this.newName.on("blur", (_e, cx) => this.cancelCreate(cx));
+    // Search in files: options, inputs and the last results.
+    this.grep = { matchCase: false, word: false, regex: false, ignore: true, details: true, tree: true, loading: false, error: null,
+      results: null, seq: 0, folded: new Set(), took: 0 };
+    this.findQuery = InputState.new({ placeholder: "Search" });
+    this.findInclude = InputState.new({ placeholder: "files to include  (e.g. *.ts, src/api)" });
+    this.findExclude = InputState.new({ placeholder: "files to exclude  (e.g. node_modules, dist, *.min.js)" });
+    for (const s of [this.findQuery, this.findInclude, this.findExclude]) {
+      s.on("change", () => this.scheduleSearch());
+      s.on("submit", (_e, cx) => { this.grep.due = 0; this.runSearch(cx); });
+    }
     this.pickerFilter = InputState.new({ placeholder: "Filter branches…" });
     this.pickerFilter.on("change", (_e, cx) => cx.notify());
     this.graphScroll = VirtualListScrollHandle.new();
@@ -166,6 +178,11 @@ export default class Code extends View {
         this.fullFile = Boolean(saved.fullFile);
         if (saved.sideW) this.sideW = saved.sideW;
         if (saved.changesTree === false) this.changesTree = false;
+        if (saved.find) {
+          for (const k of ["matchCase", "word", "regex", "ignore", "details", "tree"]) if (typeof saved.find[k] === "boolean") this.grep[k] = saved.find[k];
+          if (saved.find.include) this.findInclude.set_value(saved.find.include);
+          if (saved.find.exclude) this.findExclude.set_value(saved.find.exclude);
+        }
       }
     } catch {}
     // tab.new props: open (a path or a list, relative to the space folder) and view.
@@ -174,6 +191,8 @@ export default class Code extends View {
     if (VIEWS.some(v => v.id === p.view)) this.view = p.view;
     this.loadTree(cx);
     this.loadRepo(cx);
+    if (typeof p.find === "string" && p.find) { this.view = "search"; this.findQuery.set_value(p.find); this.runSearch(cx); }
+    cx.timer.every(120, cx => { if (this.grep.due && Date.now() >= this.grep.due) { this.grep.due = 0; this.runSearch(cx); } });
     cx.timer.every(5000, cx => {
       if (hwin()?.active === false || !this.repo) return;
       if (this.view === "changes" || Date.now() - this.work.at > 30000) this.loadWork(cx);
@@ -189,6 +208,7 @@ export default class Code extends View {
           if (d?.state && !this.docs.some(x => x.confirmClose)) d.state.focus(); else this.handle.focus();
         }
         else if (c === "pull") this.pullBranch(cx);
+        else if (c === "search") this.openSearch(cx);
         else if (c === "explorer") this.sidebar = !this.sidebar;
         else if (c === "focus") { const d = this.docs[this.active]; if (d?.state) d.state.focus(); else this.handle.focus(); }
         cx.notify();
@@ -214,7 +234,9 @@ export default class Code extends View {
       const cur = this.docs[this.active];
       localStorage.setItem(`session:${this.space}`, JSON.stringify({ root: this.root, on: this.on, folders: [...this.folders],
         docs: files.map(d => ({ path: d.path, on: d.on })), active: cur?.kind === "file" ? files.indexOf(cur) : -1,
-        view: this.view, split: this.split, fullFile: this.fullFile, sideW: this.sideW, changesTree: this.changesTree }));
+        view: this.view, split: this.split, fullFile: this.fullFile, sideW: this.sideW, changesTree: this.changesTree,
+        find: { matchCase: this.grep.matchCase, word: this.grep.word, regex: this.grep.regex, ignore: this.grep.ignore, details: this.grep.details, tree: this.grep.tree,
+          include: this.findInclude.value(), exclude: this.findExclude.value() } }));
     } catch {}
   }
 
@@ -731,6 +753,7 @@ export default class Code extends View {
         heading: t.ansi4, strong: t.ansi3, emphasis: t.ansi5, code: t.ansi2, quote: t.dim, list: t.ansi5, link: t.ansi6 } });
     doc.disk = text; doc.crlf = text.includes("\r\n");
     doc.base = doc.state.value(); doc.dirty = false; doc.conflict = false; doc.error = null;
+    if (doc.pendingSel) { this.selectAt(doc, doc.pendingSel); doc.pendingSel = null; }
     doc.state.on("change", (_e, cx) => {
       const dirty = doc.state.value() !== doc.base;
       if (dirty !== doc.dirty) { doc.dirty = dirty; cx.notify(); }
@@ -900,6 +923,178 @@ export default class Code extends View {
   }
 
   sumStats(files) { return files.reduce((a, f) => ({ add: a.add + (f.add || 0), del: a.del + (f.del || 0) }), { add: 0, del: 0 }); }
+
+  // ---- search in files ----
+  openSearch(cx) {
+    this.setView("search", cx);
+    const d = this.docs[this.active];
+    if (d?.kind === "file" && d.state) {
+      const r = d.state.selected_range();
+      const sel = r.end > r.start ? d.state.value().slice(r.start, r.end) : "";
+      if (sel && !sel.includes("\n") && sel.length <= 200) this.findQuery.set_value(sel);
+    }
+    this.findQuery.focus();
+    cx.timer.after(50, () => { if (this.view === "search") this.findQuery.focus(); });   // the field exists from the next frame
+    if (this.findQuery.value()) this.runSearch(cx);
+  }
+
+  // Typing searches 350 ms after the last key (the timer started in init runs it).
+  scheduleSearch() { this.grep.due = Date.now() + 350; }
+
+  runSearch(cx) {
+    const f = this.grep, q = this.findQuery.value(), n = ++f.seq;
+    if (!q || !this.root) { f.results = null; f.error = null; f.loading = false; cx.notify(); return; }
+    const o = { query: q, matchCase: f.matchCase, word: f.word, regex: f.regex, ignore: f.ignore,
+      include: this.findInclude.value(), exclude: this.findExclude.value(), inRepo: Boolean(this.repo) };
+    const root = this.root, on = this.on, t0 = Date.now();
+    f.loading = true; f.error = null; this.persist(); cx.notify();
+    cx.spawn(async cx => {
+      try {
+        const r = await searchFiles(root, on, o);
+        if (n !== f.seq) return;
+        f.results = { ...r, root, on }; f.folded = new Set(); f.took = Date.now() - t0;
+      } catch (e) {
+        if (n === f.seq) { f.error = String(e.message ?? e).slice(0, 300); f.results = null; }
+      } finally { if (n === f.seq) { f.loading = false; cx.notify(); } }
+    });
+  }
+
+  // Selects line/start/end (UTF-16 columns in that line) in a loaded file.
+  selectAt(doc, m) {
+    const text = doc.state.value();
+    let off = 0;
+    for (let i = 1; i < m.line; i++) { const k = text.indexOf("\n", off); if (k < 0) break; off = k + 1; }
+    doc.state.set_selected_range({ start: off + m.start, end: off + m.end });
+  }
+
+  openMatch(path, m, cx) {
+    const r = this.grep.results;
+    if (!r) return;
+    this.open(`${r.root}/${path}`, r.on, cx, true);
+    const doc = this.docs[this.active];
+    if (doc?.state) { this.selectAt(doc, m); doc.state.focus(); }
+    else if (doc) doc.pendingSel = m;
+  }
+
+  sideSearch(t) {
+    const f = this.grep, r = f.results;
+    const toggle = (id, label, key, tip, deco) => div().id(id).h(20).min_w(22).px(4).flex_none().flex().items_center().justify_center().rounded(4)
+      .cursor_pointer().text_size(11).font_weight(700).font_family(mono()).tooltip(tip)
+      .bg(f[key] ? t.accent + "33" : t.background).border_1().border_color(f[key] ? t.accent : t.background)
+      .text_color(f[key] ? t.foreground : t.dim).hover(s => s.text_color(t.foreground))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { f[key] = !f[key]; this.persist(); this.runSearch(cx); cx.notify(); })
+      .child(deco ? div().underline().child(label) : label);
+    const field = (id, state, right = []) => h_flex().id(id).h(28).flex_none().pl(8).pr(3).gap(3).items_center().rounded(6)
+      .bg(t.background).border_1().border_color(t.border)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .child(div().flex_1().min_w(0).h_full().flex().items_center().child(Input.new(state).h_full().w_full().text_size(12).text_color(t.foreground)))
+      .children(right);
+
+    const form = v_flex().flex_none().px(10).pb(8).gap(6)
+      .child(h_flex().gap(4).items_center()
+        .child(div().id("f-details").w(16).h(28).flex_none().flex().items_center().justify_center().rounded(4).cursor_pointer()
+          .text_color(t.dim).hover(s => s.text_color(t.foreground)).tooltip(f.details ? "Hide include / exclude" : "Show include / exclude")
+          .on_click((_e, cx) => { f.details = !f.details; this.persist(); cx.notify(); })
+          .child(svg(`mods/code/chevron-${f.details ? "down" : "right"}.svg`).size(11)))
+        .child(div().flex_1().min_w(0).child(field("f-query", this.findQuery, [
+          toggle("f-case", "Aa", "matchCase", "Match case"),
+          toggle("f-word", "ab", "word", "Match whole word", true),
+          toggle("f-regex", ".*", "regex", "Use regular expression")]))))
+      .when(f.details, el => el
+        .child(div().pl(20).child(field("f-include", this.findInclude)))
+        .child(div().pl(20).child(field("f-exclude", this.findExclude, [
+          toggle("f-ignore", ".gi", "ignore", "Skip files listed in .gitignore")]))));
+
+    const status = f.loading ? "Searching…" : f.error ? null : !r ? (this.root ? "Type to search the whole folder" : "No folder")
+      : !r.total ? "No results" : `${r.total}${r.limited ? "+" : ""} result${r.total === 1 ? "" : "s"} in ${r.files.length} file${r.files.length === 1 ? "" : "s"}`;
+    const info = v_flex().flex_none().px(12).pb(6).gap(2).text_size(11)
+      .when(Boolean(status), el => el.child(div().text_color(t.dim).child(status)))
+      .when(Boolean(f.error), el => el.child(div().text_color(t.ansi1).child(f.error)))
+      .when(Boolean(r?.limited) && !f.loading, el => el.child(div().text_color(t.ansi3).child("Too many results: showing the first ones. Narrow the search.")));
+
+    const rows = [];
+    const MAX_ROWS = 2500;
+    const toggleFold = key => { f.folded.has(key) ? f.folded.delete(key) : f.folded.add(key); };
+    const pill = n => div().h(16).min_w(18).px(5).flex_none().rounded(8).bg(t.raised).text_size(10).text_color(t.muted)
+      .flex().items_center().justify_center().child(String(n));
+    const fileRows = (file, depth, showDir) => {
+      const folded = f.folded.has(file.path), id = rows.length;
+      const name = base(file.path), dir = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
+      rows.push(h_flex().id(`sf-${id}`).h(24).flex_none().pl(6 + depth * 14).pr(8).gap(4).items_center().rounded(5).cursor_pointer()
+        .hover(s => s.bg(t.hover))
+        .on_click((_e, cx) => { toggleFold(file.path); cx.notify(); })
+        .child(svg(`mods/code/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none().text_color(t.dim))
+        .child(this.badge(name))
+        .child(div().flex_none().max_w(180).truncate().text_color(t.foreground).child(name))
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(showDir ? dir : ""))
+        .child(pill(file.matches.length)));
+      if (folded) return;
+      for (let mi = 0; mi < file.matches.length && rows.length < MAX_ROWS; mi++) {
+        const m = file.matches[mi], text = m.text;
+        let from = Math.max(0, m.start - 16);
+        while (from < m.start && /\s/.test(text[from])) from++;
+        const before = (from > 0 ? "…" : "") + text.slice(from, m.start);
+        rows.push(h_flex().id(`sm-${rows.length}`).h(22).flex_none().pl(36 + depth * 14).pr(8).gap(6).items_center().rounded(5).cursor_pointer()
+          .hover(s => s.bg(t.hover)).tooltip(`${file.path}:${m.line}`)
+          .on_click((_e, cx) => this.openMatch(file.path, m, cx))
+          .child(h_flex().flex_1().min_w(0).overflow_hidden().text_size(12).whitespace_nowrap()
+            .child(div().flex_none().text_color(t.muted).child(before))
+            .child(div().flex_none().rounded(2).bg(t.ansi3 + "55").text_color(t.foreground).child(text.slice(m.start, m.end).slice(0, 200)))
+            .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(text.slice(m.end, m.end + 300))))
+          .child(div().flex_none().text_size(10).text_color(t.dim).child(String(m.line))));
+      }
+    };
+    // Tree: folders with their match count; a folder holding only one folder shows as "a/b/c".
+    const treeRows = (node, prefix, depth) => {
+      for (const [name0, child0] of [...node.dirs].sort((a, b) => a[0].localeCompare(b[0]))) {
+        if (rows.length >= MAX_ROWS) return;
+        let name = name0, child = child0, path = prefix ? `${prefix}/${name0}` : name0;
+        while (!child.files.length && child.dirs.size === 1) {
+          const [n, c] = [...child.dirs][0];
+          name += "/" + n; path += "/" + n; child = c;
+        }
+        const key = "dir:" + path, folded = f.folded.has(key);
+        rows.push(h_flex().id(`sd-${rows.length}`).h(24).flex_none().pl(6 + depth * 14).pr(8).gap(4).items_center().rounded(5).cursor_pointer()
+          .hover(s => s.bg(t.hover))
+          .on_click((_e, cx) => { toggleFold(key); cx.notify(); })
+          .child(svg(`mods/code/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none().text_color(t.dim))
+          .child(div().w(26).flex_none().flex().justify_center().child(svg("mods/code/folder.svg").size(14).text_color(t.accent)))
+          .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(name))
+          .child(pill(child.count)));
+        if (!folded) treeRows(child, path, depth + 1);
+      }
+      for (const file of node.files) { if (rows.length >= MAX_ROWS) return; fileRows(file, depth, false); }
+    };
+    if (r && f.tree) {
+      const tree = { dirs: new Map(), files: [], count: 0 };
+      for (const file of r.files) {
+        let n = tree;
+        n.count += file.matches.length;
+        for (const part of file.path.split("/").slice(0, -1)) {
+          if (!n.dirs.has(part)) n.dirs.set(part, { dirs: new Map(), files: [], count: 0 });
+          n = n.dirs.get(part); n.count += file.matches.length;
+        }
+        n.files.push(file);
+      }
+      treeRows(tree, "", 0);
+    } else if (r) for (const file of r.files) { if (rows.length >= MAX_ROWS) break; fileRows(file, 0, true); }
+    if (rows.length >= MAX_ROWS) rows.push(div().p(8).text_size(11).text_color(t.dim).child("List cut here: narrow the search to see the rest."));
+
+    const allFolded = Boolean(r?.files.length) && r.files.every(x => f.folded.has(x.path));
+    return v_flex().flex_1().min_h(0)
+      .child(this.section(t, "SEARCH", [
+        this.iconBtn(t, "f-refresh", "refresh", "Search again", cx => this.runSearch(cx)),
+        this.iconBtn(t, "f-view", f.tree ? "list" : "tree", f.tree ? "View as list" : "View as tree", () => { f.tree = !f.tree; this.persist(); }),
+        this.iconBtn(t, "f-fold", allFolded ? "chevron-right" : "chevron-down", allFolded ? "Expand all" : "Collapse all", () => {
+          const keys = new Set(r?.files.map(x => x.path) ?? []);
+          for (const x of r?.files ?? []) { const parts = x.path.split("/"); for (let i = 1; i < parts.length; i++) keys.add("dir:" + parts.slice(0, i).join("/")); }
+          f.folded = allFolded ? new Set() : keys;
+        }),
+        this.iconBtn(t, "f-clear", "x", "Clear search", cx => { this.findQuery.set_value(""); f.seq++; f.results = null; f.error = null; f.loading = false; this.findQuery.focus(); })]))
+      .child(form).child(info)
+      .child(v_flex().id("f-results").flex_1().min_h(0).overflow_y_scrollbar().px(4).pb(6).text_size(13).children(rows));
+  }
 
   // ---- sidebars ----
   explorerRows(prefix, depth, out, t) {
@@ -1464,7 +1659,7 @@ ${e?.stack ?? ""}`); }
 
     // ---- sidebar ----
     const side = !this.sidebar ? null : v_flex().w(Math.min(this.sideW, Math.max(180, (this.width ?? 1400) - 360))).h_full().flex_none().min_h(0).bg(t.chrome).border_r(1).border_color(t.border)
-      .child(this.view === "explorer" ? this.sideExplorer(t) : this.view === "changes" ? this.sideChanges(t)
+      .child(this.view === "explorer" ? this.sideExplorer(t) : this.view === "search" ? this.sideSearch(t) : this.view === "changes" ? this.sideChanges(t)
         : this.view === "compare" ? this.sideCompare(t) : this.sideGraph(t));
 
     // ---- tabs ----

@@ -14,6 +14,11 @@
       "title": "Git: Pull",
       "command": "code.pull",
       "words": "editor source control update upstream"
+    },
+    {
+      "title": "Search in files",
+      "command": "code.search",
+      "words": "find grep editor codebase"
     }
   ],
   "focusable": true
