@@ -140,6 +140,13 @@ export default class Code extends View {
     this.pickerFilter.on("change", (_e, cx) => cx.notify());
     this.graphScroll = VirtualListScrollHandle.new();
     this.diffScroll = VirtualListScrollHandle.new();
+    this.sel = null;                                    // diff line selection { id, a, b, side, drag }
+    this.find = { open: false, query: "", at: 0, hits: [], rows: null, q: null, focused: false };
+    this.findInput = InputState.new({ placeholder: "Find in diff" });
+    this.findInput.on("change", (_e, cx) => { this.find.query = this.findInput.value(); this.find.at = 0; this.jumpHit(0); cx.notify(); });
+    this.findInput.on("submit", (_e, cx) => { this.jumpHit(1); cx.notify(); });
+    this.findInput.on("focus", (_e, cx) => { this.find.focused = true; cx.notify(); });
+    this.findInput.on("blur", (_e, cx) => { this.find.focused = false; cx.notify(); });
     this.handle = cx.focus_handle();
     this.branchMenu = false;
     this.branchFilter = InputState.new({ placeholder: "Switch to branch…" });
@@ -1092,44 +1099,133 @@ export default class Code extends View {
         .children(remote.slice(0, 300).map(row)));
   }
 
+  // ---- diff find / line selection ----
+  diffRowsOf(doc) { return this.split ? doc.split : doc.rows; }
+
+  findHits(rows) {
+    const q = this.find.open ? this.find.query.toLowerCase() : "";
+    if (!q || !rows) return [];
+    if (this.find.rows !== rows || this.find.q !== q) {
+      const hit = s => Boolean(s?.toLowerCase().includes(q));
+      this.find.hits = rows.flatMap((r, i) => hit(r.text) || hit(r.l?.text) || hit(r.r?.text) ? [i] : []);
+      this.find.rows = rows; this.find.q = q;
+    }
+    return this.find.hits;
+  }
+
+  jumpHit(step) {
+    const doc = this.docs[this.active];
+    if (doc?.kind !== "diff") return;
+    const hits = this.findHits(this.diffRowsOf(doc));
+    if (!hits.length) return;
+    this.find.at = (this.find.at + step + hits.length) % hits.length;
+    this.diffScroll.scroll_to_item(hits[this.find.at], "center");
+  }
+
+  mark(text, t, current) {
+    const q = this.find.open ? this.find.query.toLowerCase() : "";
+    if (!q || !text) return text;
+    const low = text.toLowerCase(), parts = [];
+    let i = 0, j;
+    while ((j = low.indexOf(q, i)) >= 0) {
+      if (j > i) parts.push(div().child(text.slice(i, j)));
+      parts.push(div().rounded(2).bg(current ? t.ansi3 : t.ansi3 + "55").when(current, e => e.text_color(t.background)).child(text.slice(j, j + q.length)));
+      i = j + q.length;
+    }
+    if (!parts.length) return text;
+    if (i < text.length) parts.push(div().child(text.slice(i)));
+    return h_flex().children(parts);
+  }
+
+  // side: "l"/"r" for a split cell, null for a whole row (which joins a selection on either side).
+  selectable(el, id, i, side, t) {
+    const s = this.sel?.id === id ? this.sel : null;
+    const on = s && (side === null || s.side === side) && i >= Math.min(s.a, s.b) && i <= Math.max(s.a, s.b);
+    return el.when(Boolean(on), e => e.bg(t.selection + "99"))
+      .on_mouse_down("left", (e, cx) => {
+        this.sel = e.modifiers.shift && s ? { ...s, b: i, drag: true } : { id, a: i, b: i, side: side ?? (this.split ? "r" : null), drag: true };
+        cx.notify();
+      })
+      .on_mouse_move((e, cx) => {
+        const cur = this.sel;
+        if (cur?.drag && cur.id === id && e.pressed_button === "left" && cur.b !== i && (side === null || cur.side === side)) { cur.b = i; cx.notify(); }
+      });
+  }
+
+  copyDiff(cx) {
+    const doc = this.docs[this.active], s = this.sel;
+    if (!s || s.id !== `${doc.key}-${this.split}`) return;
+    const lines = this.diffRowsOf(doc).slice(Math.min(s.a, s.b), Math.max(s.a, s.b) + 1)
+      .map(r => r.kind === "pair" ? (s.side === "l" ? r.l : r.r)?.text : r.text).filter(x => x != null);
+    cx.write_to_clipboard(lines.join("\n"));
+    this.message = `Copied ${lines.length} line${lines.length === 1 ? "" : "s"}`;
+  }
+
+  diffKey(e, cx) {
+    const doc = this.docs[this.active];
+    if (doc?.kind !== "diff") return;
+    const m = e.modifiers, mod = (m.control || m.platform) && !m.alt && !m.shift, k = e.key.toLowerCase();
+    const done = () => { cx.stop_propagation(); cx.notify(); };
+    if (mod && k === "f") { this.find.open = true; this.find.rows = null; this.findInput.focus(); return done(); }
+    if (k === "f3") { this.jumpHit(m.shift ? -1 : 1); return done(); }
+    if (k === "escape" && this.find.open) { this.find.open = false; this.handle.focus(); return done(); }
+    if (this.find.focused) return;
+    if (mod && k === "c" && this.sel) { this.copyDiff(cx); return done(); }
+    if (mod && k === "a") { const n = this.diffRowsOf(doc).length; this.sel = { id: `${doc.key}-${this.split}`, a: 0, b: n - 1, side: this.split ? "r" : null }; return done(); }
+    if (k === "escape" && this.sel) { this.sel = null; return done(); }
+  }
+
+  findBar(t, hits) {
+    return h_flex().absolute().top(6).right(18).h(32).pl(10).pr(4).gap(4).items_center().rounded(8).bg(t.popover).border_1().border_color(this.find.focused ? t.accent : t.border).text_size(12)
+      .child(div().id("find-input").w(200).h_full().flex().items_center().cursor_text().on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.findInput).h_full().text_size(12).text_color(t.foreground)))
+      .child(div().w(58).text_right().text_size(11).text_color(this.find.query && !hits.length ? t.ansi1 : t.dim).child(this.find.query ? (hits.length ? `${this.find.at + 1}/${hits.length}` : "0 results") : ""))
+      .child(this.btn(t, "find-prev", "↑", () => this.jumpHit(-1), { h: 24, px: 7, bg: t.popover }))
+      .child(this.btn(t, "find-next", "↓", () => this.jumpHit(1), { h: 24, px: 7, bg: t.popover }))
+      .child(this.btn(t, "find-close", "×", () => { this.find.open = false; this.handle.focus(); }, { h: 24, px: 7, bg: t.popover }));
+  }
+
   // ---- main area ----
   diffBody(t, doc) {
     const size = 12, rowH = 20, cw = 7.25, g = Math.max(3, String(Math.max(1, ...doc.rows.map(r => Math.max(r.old ?? 0, r.new ?? 0)))).length);
     const gw = Math.ceil(g * cw) + 12;
     const addBg = t.ansi2 + "1f", delBg = t.ansi1 + "22", addGut = t.ansi2 + "33", delGut = t.ansi1 + "38";
-    const hunk = r => h_flex().w_full().h(rowH).flex_none().px(12).gap(8).items_center().bg(t.accent + "14").text_color(t.accent)
-      .child(div().child("⋯")).child(div().truncate().text_color(t.muted).child(r.text));
-    const cell = (r, side) => {
+    const rows = this.diffRowsOf(doc), id = `${doc.key}-${this.split}`;
+    const hits = this.findHits(rows), cur = hits.length ? hits[Math.min(this.find.at, hits.length - 1)] : -1;
+    const sel = (el, i, side) => this.selectable(el, id, i, side, t);
+    const hunk = (r, i) => sel(h_flex().w_full().h(rowH).flex_none().px(12).gap(8).items_center().bg(t.accent + "14").text_color(t.accent)
+      .child(div().child("⋯")).child(div().truncate().text_color(t.muted).child(this.mark(r.text, t, i === cur))), i, null);
+    const note = (r, i) => sel(div().w_full().h(rowH).px(12).text_color(t.dim).child(this.mark(r.text, t, i === cur)), i, null);
+    const cell = (r, side, i) => {
       if (!r) return div().flex_1().min_w(0).h_full().bg(t.raised + "80");
       const k = side === "l" && r.kind === " " ? " " : r.kind;
       const bg = k === "+" ? addBg : k === "-" ? delBg : null, gut = k === "+" ? addGut : k === "-" ? delGut : null;
       const num = side === "l" ? r.old : side === "r" ? r.new : null;
-      return h_flex().flex_1().min_w(0).h_full().when(Boolean(bg), e => e.bg(bg))
+      return sel(h_flex().flex_1().min_w(0).h_full().when(Boolean(bg), e => e.bg(bg))
         .child(div().w(gw).flex_none().h_full().pr(8).text_right().text_color(t.dim).when(Boolean(gut), e => e.bg(gut)).child(num === undefined ? "" : String(num)))
         .child(div().w(16).flex_none().text_center().text_color(k === "+" ? t.ansi2 : k === "-" ? t.ansi1 : t.dim).child(k === " " ? "" : k))
-        .child(div().flex_1().min_w(0).truncate().child(r.text));
+        .child(div().flex_1().min_w(0).truncate().child(this.mark(r.text, t, i === cur))), i, side);
     };
-    const unifiedRow = r => {
-      if (r.kind === "@") return hunk(r);
-      if (r.kind === "") return div().w_full().h(rowH).px(12).text_color(t.dim).child(r.text);
+    const unifiedRow = (r, i) => {
+      if (r.kind === "@") return hunk(r, i);
+      if (r.kind === "") return note(r, i);
       const bg = r.kind === "+" ? addBg : r.kind === "-" ? delBg : null, gut = r.kind === "+" ? addGut : r.kind === "-" ? delGut : null;
-      return h_flex().w_full().h(rowH).flex_none().when(Boolean(bg), e => e.bg(bg))
+      return sel(h_flex().w_full().h(rowH).flex_none().when(Boolean(bg), e => e.bg(bg))
         .child(div().w(gw).flex_none().h_full().pr(6).text_right().text_color(t.dim).when(Boolean(gut), e => e.bg(gut)).child(r.old === undefined ? "" : String(r.old)))
         .child(div().w(gw).flex_none().h_full().pr(8).text_right().text_color(t.dim).when(Boolean(gut), e => e.bg(gut)).child(r.new === undefined ? "" : String(r.new)))
         .child(div().w(18).flex_none().text_center().text_color(r.kind === "+" ? t.ansi2 : r.kind === "-" ? t.ansi1 : t.dim).child(r.kind === " " ? "" : r.kind))
-        .child(div().flex_1().child(r.text));
+        .child(div().flex_1().child(this.mark(r.text, t, i === cur))), i, null);
     };
-    const splitRow = r => r.kind === "pair"
-      ? h_flex().w_full().h(rowH).flex_none().child(cell(r.l, "l")).child(div().w(1).h_full().bg(t.border)).child(cell(r.r, "r"))
-      : r.kind === "@" ? hunk(r) : div().w_full().h(rowH).px(12).text_color(t.dim).child(r.text);
-    const rows = this.split ? doc.split : doc.rows;
-    const list = v_virtual_list(`diff-${doc.key}-${this.split}`, rows.length, rowH, i => String(i),
+    const splitRow = (r, i) => r.kind === "pair"
+      ? h_flex().w_full().h(rowH).flex_none().child(cell(r.l, "l", i)).child(div().w(1).h_full().bg(t.border)).child(cell(r.r, "r", i))
+      : r.kind === "@" ? hunk(r, i) : note(r, i);
+    const list = v_virtual_list(`diff-${id}`, rows.length, rowH, i => String(i),
       range => this.safeRows(rows.slice(range.start, range.end), range.start, this.split ? splitRow : unifiedRow, t, rowH)).track_scroll(this.diffScroll).size_full();
     return div().flex_1().min_h(0).relative().font_family(mono()).text_size(size).bg(t.background)
       .child(this.split ? list
         : div().id(`diffx-${doc.key}`).size_full().overflow_x_scrollbar()
           .child(div().w_full().min_w(gw * 2 + 40 + (doc.longest ?? 80) * cw).h_full().child(list)))
-      .child(Scrollbar.vertical(`diff-${doc.key}-${this.split}`).viewport_from_layout().absolute().inset_0());
+      .child(Scrollbar.vertical(`diff-${id}`).viewport_from_layout().absolute().inset_0())
+      .when(this.find.open, e => e.child(this.findBar(t, hits)));
   }
 
   diffView(t, doc) {
@@ -1408,7 +1504,8 @@ ${e?.stack ?? ""}`); }
         else { this.sidebar = true; this.sideW = Math.round(Math.min(800, Math.max(180, w))); }
         cx.notify();
       })
-      .on_window_mouse_up("left", (_e, cx) => { if (this.drag) { this.drag = null; this.persist(); cx.notify(); } })
+      .on_window_mouse_up("left", (_e, cx) => { if (this.sel) this.sel.drag = false; if (this.drag) { this.drag = null; this.persist(); cx.notify(); } })
+      .on_key_down((e, cx) => this.diffKey(e, cx))
       .on_size_change((size, cx) => { const w = size.width / (settings().zoom || 1); if (Math.abs((this.width ?? 0) - w) > 20) { this.width = w; cx.notify(); } })
       .child(top)
       .child(h_flex().items_stretch().flex_1().min_h(0).min_w(0).when(Boolean(side), el => el.child(side))
