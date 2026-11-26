@@ -1141,15 +1141,32 @@ export default class Code extends View {
   selectable(el, id, i, side, t) {
     const s = this.sel?.id === id ? this.sel : null;
     const on = s && (side === null || s.side === side) && i >= Math.min(s.a, s.b) && i <= Math.max(s.a, s.b);
-    return el.when(Boolean(on), e => e.bg(t.selection + "99"))
-      .on_mouse_down("left", (e, cx) => {
-        this.sel = e.modifiers.shift && s ? { ...s, b: i, drag: true } : { id, a: i, b: i, side: side ?? (this.split ? "r" : null), drag: true };
-        cx.notify();
-      })
-      .on_mouse_move((e, cx) => {
-        const cur = this.sel;
-        if (cur?.drag && cur.id === id && e.pressed_button === "left" && cur.b !== i && (side === null || cur.side === side)) { cur.b = i; cx.notify(); }
-      });
+    return el.when(Boolean(on), e => e.bg(t.selection + "99"));
+  }
+
+  // Virtual list rows can't take mouse handlers, so the diff body maps the pointer to a row itself.
+  pointRow(e, count, rowH) {
+    if (!e.local_position) return null;
+    const zoom = settings().zoom || 1, y = e.local_position.y / zoom + this.diffScroll.offset().y;
+    const i = Math.floor(y / rowH);
+    if (i < 0 || i >= count) return null;
+    const side = this.split ? (e.bounds && e.local_position.x < e.bounds.width / 2 ? "l" : "r") : null;
+    return { i, side };
+  }
+
+  diffMouseDown(e, cx, id, count, rowH) {
+    const p = this.pointRow(e, count, rowH);
+    if (!p) return;
+    const s = this.sel?.id === id ? this.sel : null;
+    this.sel = e.modifiers.shift && s ? { ...s, b: p.i, drag: true } : { id, a: p.i, b: p.i, side: p.side, drag: true };
+    cx.notify();
+  }
+
+  diffMouseMove(e, cx, id, count, rowH) {
+    const cur = this.sel;
+    if (!cur?.drag || cur.id !== id || e.pressed_button !== "left") return;
+    const p = this.pointRow(e, count, rowH);
+    if (p && cur.b !== p.i) { cur.b = p.i; cx.notify(); }
   }
 
   copyDiff(cx) {
@@ -1176,7 +1193,7 @@ export default class Code extends View {
   }
 
   findBar(t, hits) {
-    return h_flex().absolute().top(6).right(18).h(32).pl(10).pr(4).gap(4).items_center().rounded(8).bg(t.popover).border_1().border_color(this.find.focused ? t.accent : t.border).text_size(12)
+    return h_flex().id("find-bar").absolute().top(6).right(18).h(32).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).pl(10).pr(4).gap(4).items_center().rounded(8).bg(t.popover).border_1().border_color(this.find.focused ? t.accent : t.border).text_size(12)
       .child(div().id("find-input").w(200).h_full().flex().items_center().cursor_text().on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.findInput).h_full().text_size(12).text_color(t.foreground)))
       .child(div().w(58).text_right().text_size(11).text_color(this.find.query && !hits.length ? t.ansi1 : t.dim).child(this.find.query ? (hits.length ? `${this.find.at + 1}/${hits.length}` : "0 results") : ""))
       .child(this.btn(t, "find-prev", "↑", () => this.jumpHit(-1), { h: 24, px: 7, bg: t.popover }))
@@ -1220,7 +1237,9 @@ export default class Code extends View {
       : r.kind === "@" ? hunk(r, i) : note(r, i);
     const list = v_virtual_list(`diff-${id}`, rows.length, rowH, i => String(i),
       range => this.safeRows(rows.slice(range.start, range.end), range.start, this.split ? splitRow : unifiedRow, t, rowH)).track_scroll(this.diffScroll).size_full();
-    return div().flex_1().min_h(0).relative().font_family(mono()).text_size(size).bg(t.background)
+    return div().id(`diffbody-${id}`).flex_1().min_h(0).relative().font_family(mono()).text_size(size).bg(t.background)
+      .on_mouse_down("left", (e, cx) => this.diffMouseDown(e, cx, id, rows.length, rowH))
+      .on_mouse_move((e, cx) => this.diffMouseMove(e, cx, id, rows.length, rowH))
       .child(this.split ? list
         : div().id(`diffx-${doc.key}`).size_full().overflow_x_scrollbar()
           .child(div().w_full().min_w(gw * 2 + 40 + (doc.longest ?? 80) * cw).h_full().child(list)))
