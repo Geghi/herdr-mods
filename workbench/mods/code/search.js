@@ -78,3 +78,52 @@ export async function searchFiles(root, on, o) {
   if (!limited && files.some(f => f.matches.length >= PER_FILE)) limited = true;
   return { files, total, limited };
 }
+
+// ---- quick open (Ctrl+P) ----
+
+const HEAVY = ["node_modules", ".git", "dist", "build", ".next", "target", "vendor", ".venv", "venv", "__pycache__", ".cache"];
+
+// Every file under root, relative: git's list in a repo (tracked + untracked, not ignored),
+// else the text files git can see there, skipping the usual heavy folders.
+export async function listFiles(root, on, inRepo) {
+  if (inRepo) {
+    const r = await exec("git", ["-c", "core.quotepath=off", "ls-files", "--cached", "--others", "--exclude-standard"], { cwd: root, on, timeout: 30000 });
+    if (r.code === 0) return [...new Set(r.stdout.split("\n").map(s => s.replace(/\r$/, "")).filter(Boolean))];
+  }
+  const r = await exec("git", ["-c", "core.quotepath=off", "grep", "--no-index", "--exclude-standard", "-l", "-I", "-e", "", "--", ".",
+    ...HEAVY.flatMap(h => [`:(exclude,glob)**/${h}`, `:(exclude,glob)**/${h}/**`])], { cwd: root, on, timeout: 30000 });
+  if (r.code > 1) throw new Error((r.stderr || "Can't list the files").trim().split("\n")[0]);
+  return r.stdout.split("\n").map(s => s.replace(/\r$/, "")).filter(Boolean);
+}
+
+const WORD = /[\/\._\-\s]/;
+function subseq(q, text, from, lower) {
+  const hits = [];
+  let i = from;
+  for (const ch of q) {
+    const k = lower.indexOf(ch, i);
+    if (k < 0) return null;
+    hits.push(k); i = k + 1;
+  }
+  return hits;
+}
+
+// Fuzzy match like VS Code's quick open: the query's letters in order, preferring the file name,
+// runs of letters and word starts. q is lowercase without spaces. -> { score, hits } or null.
+export function fuzzy(q, path) {
+  const lower = path.toLowerCase(), nameAt = path.lastIndexOf("/") + 1;
+  let hits = subseq(q, path, nameAt, lower), inName = Boolean(hits);
+  if (!hits) hits = subseq(q, path, 0, lower);
+  if (!hits) return null;
+  let score = inName ? 40 : 0;
+  for (let n = 0; n < hits.length; n++) {
+    const k = hits[n];
+    if (n && hits[n - 1] === k - 1) score += 6;
+    if (k === 0 || WORD.test(path[k - 1]) || (path[k] !== lower[k] && path[k - 1] === lower[k - 1])) score += 4;
+    if (k >= nameAt) score += 1;
+  }
+  if (inName && lower.startsWith(q, nameAt)) score += 25;
+  if (inName && lower.length - nameAt === q.length) score += 30;
+  score -= path.length * 0.05 + (path.split("/").length - 1) * 0.5;
+  return { score, hits };
+}

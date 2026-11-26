@@ -1,11 +1,11 @@
 // A VS Code-style workbench tab: Explorer + editor, Changes, Compare (branch vs base), Git Graph.
 // Works on this machine and on ssh machines (reads with readTextFile {on}, git and saves through exec there).
 import { View, div, svg, PathBuilder } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
+import { v_flex, h_flex, Editor, EditorState, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle, ScrollHandle } from "gpui-base";
 import { spaces, panes, focused, run, home, exec, readTextFile, writeTextFile, theme, settings, window as hwin, props, shared, nextCommand, checking } from "herdr";
 import { gitIn, repoRoot, branches, workingChanges, pull, stage, unstage, discard, changedFiles, mergeBase, aheadBehind, fileDiff, unifiedRows, splitRows, textAsAdded, commits, layoutGraph, buildTree, relTime, EMPTY_TREE } from "./git.js";
 import { fileIcon } from "./icons.js";
-import { searchFiles } from "./search.js";
+import { searchFiles, listFiles, fuzzy } from "./search.js";
 import { languageOf } from "./langs.js";
 
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", cjs: "js", toml: "yaml", yml: "yaml", jsonc: "json", svelte: "html", vue: "html", htm: "html", md: "markdown" };
@@ -53,6 +53,23 @@ async function createEntry(path, folder, on) {
     throw e;
   }
   if (r.code !== 0) throw new Error(r.stderr.trim().split("\n")[0] || "Couldn't create it");
+}
+
+// ---- line comments by file type ----
+const HASH = new Set(["py", "sh", "bash", "zsh", "fish", "rb", "yaml", "yml", "toml", "ps1", "pl", "r", "conf", "ini", "dockerfile", "makefile", "mk", "env", "gitignore", "properties", "nix", "ex", "exs", "cmake", "tf"]);
+const DASH = new Set(["sql", "lua", "hs", "elm"]);
+const XML = new Set(["html", "htm", "xml", "svg", "md", "markdown", "vue", "svelte", "xaml", "plist"]);
+const BLOCK = new Set(["css", "scss", "less"]);
+function commentFor(path) {
+  const b = base(path).toLowerCase();
+  const e = b === "dockerfile" || b === "makefile" ? b : b.startsWith(".") && b.slice(1, 4) === "env" ? "env" : ext(path);
+  if (HASH.has(e)) return ["#"];
+  if (DASH.has(e)) return ["--"];
+  if (XML.has(e)) return ["<!--", "-->"];
+  if (BLOCK.has(e)) return ["/*", "*/"];
+  if (e === "bat" || e === "cmd") return ["REM"];
+  if (e === "json" || e === "txt") return [null];
+  return ["//"];
 }
 
 // ---- saving ----
@@ -134,6 +151,7 @@ export default class Code extends View {
     this.picker = null;
     this.commitMsg = InputState.new({ placeholder: "Commit message (commits all changes)" });
     this.commitMsg.on("submit", (_e, cx) => this.commitAll(cx));
+    this.treeScroll = ScrollHandle.new(); this.revealRel = null; this.revealedDoc = null;
     this.treeSel = null; this.creating = null;          // explorer selection { rel, dir }; new entry { kind, dir, busy, error }
     this.newName = InputState.new({ placeholder: "Name (a/b.txt makes folders)" });
     this.newName.on("submit", (_e, cx) => this.finishCreate(cx));
@@ -148,6 +166,11 @@ export default class Code extends View {
       s.on("change", () => this.scheduleSearch());
       s.on("submit", (_e, cx) => { this.grep.due = 0; this.runSearch(cx); });
     }
+    // Quick open (Ctrl+P): file list of the folder, cached for 30 s.
+    this.qo = null; this.files = { root: null, on: null, list: [], at: 0, loading: false, error: null }; this.qoMemo = null;
+    this.qoInput = InputState.new({ placeholder: "Go to file  (name, path, or name:line)" });
+    this.qoInput.on("change", (_e, cx) => { if (this.qo) this.qo.sel = 0; cx.notify(); });
+    this.qoInput.on("submit", (_e, cx) => this.qoOpen(this.qo?.sel ?? 0, cx));
     this.pickerFilter = InputState.new({ placeholder: "Filter branches…" });
     this.pickerFilter.on("change", (_e, cx) => cx.notify());
     this.graphScroll = VirtualListScrollHandle.new();
@@ -209,6 +232,8 @@ export default class Code extends View {
         }
         else if (c === "pull") this.pullBranch(cx);
         else if (c === "search") this.openSearch(cx);
+        else if (c === "quickopen") this.openQuickOpen(cx);
+        else if (c === "comment") this.toggleComment(cx);
         else if (c === "explorer") this.sidebar = !this.sidebar;
         else if (c === "focus") { const d = this.docs[this.active]; if (d?.state) d.state.focus(); else this.handle.focus(); }
         cx.notify();
@@ -637,6 +662,23 @@ export default class Code extends View {
     this.persist(); cx.notify();
   }
 
+  // Shows a file in the Explorer: opens its folders, selects it and scrolls to it (like VS Code's auto reveal).
+  reveal(doc, cx) {
+    if (doc?.kind !== "file" || doc.on !== this.on || !this.root) return false;
+    const norm = x => x.replace(/\\/g, "/"), root = norm(this.root), path = norm(doc.path);
+    if (!path.startsWith(root + "/")) return false;
+    const rel = path.slice(root.length + 1), parts = rel.split("/");
+    let changed = false;
+    for (let i = 1; i < parts.length; i++) {
+      const dir = parts.slice(0, i).join("/");
+      if (!this.folders.has(dir)) { this.folders.add(dir); changed = true; }
+      if (!this.entries.has(dir)) this.loadFolder(dir, cx);
+    }
+    if (changed) this.persist();
+    this.treeSel = { rel, dir: false }; this.revealRel = rel;
+    return true;
+  }
+
   // The folder a new entry goes in: the selected folder, else the selected file's folder, else the root.
   targetDir() {
     const s = this.treeSel;
@@ -924,6 +966,157 @@ export default class Code extends View {
 
   sumStats(files) { return files.reduce((a, f) => ({ add: a.add + (f.add || 0), del: a.del + (f.del || 0) }), { add: 0, del: 0 }); }
 
+  // ---- quick open (Ctrl+P) ----
+  openQuickOpen(cx) {
+    if (!this.root) return;
+    this.branchMenu = false;
+    this.qo = { sel: 0 }; this.qoInput.set_value(""); this.qoInput.focus();
+    cx.timer.after(50, () => { if (this.qo) this.qoInput.focus(); });   // the field exists from the next frame
+    const fl = this.files, root = this.root, on = this.on;
+    if (fl.root === root && fl.on === on && (fl.loading || Date.now() - fl.at < 30000)) return;
+    if (fl.root !== root || fl.on !== on) fl.list = [];
+    Object.assign(fl, { root, on, loading: true, error: null });
+    cx.spawn(async cx => {
+      try {
+        const list = await listFiles(root, on, Boolean(this.repo));
+        if (fl.root === root && fl.on === on) { fl.list = list; fl.at = Date.now(); this.qoMemo = null; }
+      } catch (e) { fl.error = String(e.message ?? e).slice(0, 200); }
+      finally { fl.loading = false; cx.notify(); }
+    });
+  }
+
+  closeQuickOpen() {
+    this.qo = null;
+    const d = this.docs[this.active];
+    if (d?.state) d.state.focus(); else this.handle.focus();
+  }
+
+  // -> { list: [{ path, hits }], line }
+  qoResults() {
+    const raw = this.qoInput.value().trim().replace(/\\/g, "/");
+    const m = /^(.*?)(?::(\d+))?:?$/.exec(raw), line = m[2] ? Number(m[2]) : null;
+    const q = m[1].replace(/\s+/g, "").toLowerCase(), list = this.files.list;
+    if (this.qoMemo?.q === q && this.qoMemo.list === list) return { list: this.qoMemo.out, line };
+    let out;
+    if (!q) {
+      // Open files first (most recent first), then the folder's files in order.
+      const prefix = this.root + "/";
+      const open = this.docs.filter(d => d.kind === "file" && d.on === this.on && d.path.startsWith(prefix))
+        .map(d => d.path.slice(prefix.length)).reverse();
+      out = [...new Set([...open, ...list.slice(0, 60)])].slice(0, 60).map(path => ({ path, hits: [] }));
+    } else {
+      const scored = [];
+      for (const path of list) { const r = fuzzy(q, path); if (r) scored.push({ path, hits: r.hits, score: r.score }); }
+      scored.sort((a, b) => b.score - a.score || a.path.length - b.path.length);
+      out = scored.slice(0, 60);
+    }
+    this.qoMemo = { q, list, out };
+    return { list: out, line };
+  }
+
+  qoOpen(i, cx) {
+    if (!this.qo) return;
+    const { list, line } = this.qoResults(), pick = list[Math.max(0, Math.min(i, list.length - 1))];
+    if (!pick) return;
+    this.qo = null;
+    this.open(`${this.root}/${pick.path}`, this.on, cx, true);
+    if (line) {
+      const doc = this.docs[this.active], m = { line, start: 0, end: 0 };
+      if (doc?.state) { this.selectAt(doc, m); doc.state.focus(); } else if (doc) doc.pendingSel = m;
+    }
+    cx.notify();
+  }
+
+  quickOpenPanel(t) {
+    const { list, line } = this.qoResults(), fl = this.files, sel = Math.min(this.qo.sel, Math.max(0, list.length - 1));
+    const W = 600, left = Math.max(8, ((this.width ?? 1400) - W) / 2);
+    // The path with the matched letters in the accent color: file name bright, folder dim.
+    const segs = (path, from, to, set, color) => {
+      const parts = [];
+      let i = from;
+      while (i < to) {
+        const on = set.has(i); let j = i + 1;
+        while (j < to && set.has(j) === on) j++;
+        parts.push(div().flex_none().text_color(on ? t.accent : color).when(on, e => e.font_weight(700)).child(path.slice(i, j)));
+        i = j;
+      }
+      return parts;
+    };
+    const label = (path, hits) => {
+      const at = path.lastIndexOf("/") + 1, set = new Set(hits);
+      return [
+        h_flex().flex_none().max_w(W * 0.55).overflow_hidden().whitespace_nowrap().text_size(13).children(segs(path, at, path.length, set, t.foreground)),
+        h_flex().flex_1().min_w(0).overflow_hidden().whitespace_nowrap().text_size(11).children(segs(path, 0, Math.max(0, at - 1), set, t.dim)),
+      ];
+    };
+    const status = fl.loading && !fl.list.length ? "Listing files…" : fl.error ? fl.error : !list.length ? "No file matches" : null;
+    return v_flex().id("qo-panel").absolute().top(46).left(left).w(W).max_h(460).p(6).gap(4).rounded(10)
+      .bg(t.popover ?? t.raised).border_1().border_color(t.border).shadow_lg()
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_key_down((e, cx) => {
+        const k = e.key;
+        if (k === "escape") { cx.stop_propagation(); this.closeQuickOpen(); cx.notify(); }
+        else if (k === "down" || k === "up") {
+          cx.stop_propagation();
+          const n = this.qoResults().list.length;
+          if (n && this.qo) this.qo.sel = (Math.min(this.qo.sel, n - 1) + (k === "down" ? 1 : -1) + n) % n;
+          cx.notify();
+        }
+      })
+      .child(div().h(32).px(10).flex().items_center().rounded(7).bg(t.background).border_1().border_color(t.accent)
+        .child(Input.new(this.qoInput).h_full().w_full().text_size(13).text_color(t.foreground)))
+      .when(Boolean(status), el => el.child(div().px(10).py(6).text_size(12).text_color(fl.error ? t.ansi1 : t.dim).child(status)))
+      .child(v_flex().id("qo-list").flex_none().max_h(380).overflow_y_scrollbar()
+        .children(list.map((r, i) => h_flex().id(`qo-${i}`).h(28).flex_none().px(8).gap(6).items_center().rounded(6).cursor_pointer()
+          .bg(i === sel ? t.selected : t.popover ?? t.raised).hover(s => s.bg(i === sel ? t.selected : t.hover))
+          .on_click((_e, cx) => this.qoOpen(i, cx))
+          .child(this.badge(base(r.path)))
+          .children(label(r.path, r.hits))
+          .when(i === sel && Boolean(line), e => e.child(div().flex_none().text_size(11).text_color(t.dim).child(`line ${line}`))))))
+      .child(h_flex().px(8).gap(10).text_size(10).text_color(t.dim)
+        .child(`${fl.list.length} files${fl.loading && fl.list.length ? " · refreshing…" : ""}`)
+        .child(div().flex_1())
+        .child("↑↓ move · Enter open · Esc close · name:42 opens at line 42"));
+  }
+
+  // ---- comments (Ctrl+ù / Ctrl+/) ----
+  toggleComment(cx) {
+    const doc = this.docs[this.active];
+    if (doc?.kind !== "file" || !doc.state) return;
+    const [open, close] = commentFor(doc.path);
+    if (!open) return;
+    const st = doc.state, text = st.value(), r = st.selected_range();
+    const a = text.lastIndexOf("\n", r.start - 1) + 1;
+    const endAt = r.end > r.start && text[r.end - 1] === "\n" ? r.end - 1 : r.end;
+    let b = text.indexOf("\n", endAt); if (b < 0) b = text.length;
+    const lines = text.slice(a, b).split("\n"), body = lines.filter(l => l.trim());
+    if (!body.length) return;
+    const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const isOn = l => l.trimStart().startsWith(open) && (!close || l.trimEnd().endsWith(close));
+    const remove = body.every(isOn);
+    const indent = Math.min(...body.map(l => l.length - l.trimStart().length));
+    const out = lines.map(l => {
+      if (!l.trim()) return l;
+      if (remove) {
+        let x = l.replace(new RegExp(`^(\\s*)${esc(open)} ?`), "$1");
+        if (close) x = x.replace(new RegExp(` ?${esc(close)}(\\s*)$`), "$1");
+        return x;
+      }
+      return l.slice(0, indent) + open + " " + l.slice(indent) + (close ? " " + close : "");
+    }).join("\n");
+    st.set_selected_range({ start: a, end: b });
+    st.replace(out);
+    const delta = out.length - (b - a);
+    if (r.end > r.start) st.set_selected_range({ start: a, end: b + delta });
+    else {
+      // Keep the cursor on the same character of the line.
+      const firstLen = lines[0].length, newFirst = out.split("\n")[0].length;
+      const p = Math.max(a, Math.min(a + newFirst, r.start + (newFirst - firstLen)));
+      st.set_selected_range({ start: p, end: p });
+    }
+    st.focus(); cx.notify();
+  }
+
   // ---- search in files ----
   openSearch(cx) {
     this.setView("search", cx);
@@ -1106,6 +1299,7 @@ export default class Code extends View {
       const abs = `${this.root}/${rel}`;
       const selected = entry.dir ? this.treeSel?.dir === true && this.treeSel.rel === rel
         : current?.kind === "file" && current.path === abs && current.on === this.on;
+      if (rel === this.revealRel) this.revealAt = out.length;
       out.push(h_flex().id(`tree-${rel}`).h(24).flex_none().pl(6 + depth * 14).pr(6).gap(4).items_center().rounded(5).cursor_pointer()
         .bg(selected ? t.selected : t.chrome).hover(s => s.bg(selected ? t.selected : t.hover))
         .on_click((_e, cx) => { this.treeSel = { rel, dir: entry.dir }; entry.dir ? this.toggle(rel, cx) : this.open(abs, this.on, cx, true); })
@@ -1117,13 +1311,20 @@ export default class Code extends View {
     return out;
   }
 
+  explorerRowsRevealed(t) {
+    this.revealAt = -1;
+    const rows = this.explorerRows("", 0, [], t);
+    if (this.revealRel && this.revealAt >= 0) { this.treeScroll.scroll_to_item(this.revealAt); this.revealRel = null; }
+    return rows;
+  }
+
   sideExplorer(t) {
     return v_flex().flex_1().min_h(0)
       .child(this.section(t, `EXPLORER · ${this.root ? base(this.root) || this.root : ""}`, this.root ? [
         this.iconBtn(t, "new-file", "file-plus", "New file…", cx => this.startCreate("file", cx)),
         this.iconBtn(t, "new-folder", "folder-plus", "New folder…", cx => this.startCreate("folder", cx)),
         this.iconBtn(t, "tree-refresh", "refresh", "Refresh", cx => this.loadTree(cx))] : []))
-      .child(v_flex().id("tree").flex_1().min_h(0).overflow_y_scrollbar().px(4).pb(6).text_size(13).children(this.explorerRows("", 0, [], t))
+      .child(v_flex().id("tree").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(this.treeScroll).px(4).pb(6).text_size(13).children(this.explorerRowsRevealed(t))
         .when(Boolean(this.treeError) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim)
           .child(this.treeError || (this.root ? "Loading…" : "No folder")))));
   }
@@ -1579,6 +1780,7 @@ export default class Code extends View {
     return v_flex().flex_1().min_h(0)
       .child(h_flex().h(28).flex_none().px(12).gap(6).items_center().text_size(11).text_color(t.dim).bg(t.background)
         .child(div().flex_1().min_w(0).truncate().child((doc.on ? `${doc.on}: ` : "") + doc.path))
+        .child(this.btn(t, "f-reveal", "Reveal in Explorer", cx => { if (this.reveal(doc, cx)) this.setView("explorer", cx); }, { h: 20, px: 8, icon: "files" }))
         .when(Boolean(change), el => el.child(this.btn(t, "f-diff", `View changes (${change.status})`, cx => this.openDiff(
           this.workDiff(change, !this.work.unstaged.includes(change)), cx, true), { h: 20, px: 8 }))))
       .when(Boolean(doc.conflict), el => el.child(banner("This file changed on disk since you opened it.", [
@@ -1627,6 +1829,7 @@ ${e?.stack ?? ""}`); }
     if (!checking()) this.autoFocus(cx);
     this.takeRequest(cx);
     const t = theme(), doc = this.docs[this.active];
+    if (doc !== this.revealedDoc) { this.revealedDoc = doc; if (doc?.kind === "file") this.reveal(doc, cx); }
 
     // ---- top bar: views + repo ----
     const changes = new Set([...this.work.staged, ...this.work.unstaged].map(f => f.path)).size, compact = (this.width ?? 1400) < 1050;
@@ -1709,7 +1912,7 @@ ${e?.stack ?? ""}`); }
           .on_click((_e, cx) => this.save(this.active, cx, false)).child(fdoc.dirty ? "Save" : "Saved")));
 
     return v_flex().id("code").size_full().min_h(0).overflow_hidden().bg(t.background).text_color(t.foreground).track_focus(this.handle).relative()
-      .on_mouse_down("left", (_e, cx) => { if (this.branchMenu) { this.branchMenu = false; cx.notify(); } if (!this.docs[this.active]?.state) this.handle.focus(); })
+      .on_mouse_down("left", (_e, cx) => { if (this.qo) { this.closeQuickOpen(); cx.notify(); } if (this.branchMenu) { this.branchMenu = false; cx.notify(); } if (!this.docs[this.active]?.state) this.handle.focus(); })
       .on_window_mouse_move((e, cx) => {
         if (!this.drag) return;
         if (e.pressed_button !== "left") { this.drag = null; this.persist(); cx.notify(); return; }
@@ -1729,6 +1932,7 @@ ${e?.stack ?? ""}`); }
           .on_click((e, cx) => { if (e.click_count >= 2) { this.sideW = 300; this.persist(); cx.notify(); } })))
         .child(main))
       .child(status)
-      .when(this.branchMenu && Boolean(this.repo), el => el.child(this.branchPanel(t)));
+      .when(this.branchMenu && Boolean(this.repo), el => el.child(this.branchPanel(t)))
+      .when(Boolean(this.qo), el => el.child(this.quickOpenPanel(t)));
   }
 }

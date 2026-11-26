@@ -18,7 +18,8 @@ the space you are in, on this computer or on an ssh machine.
     file/folder puts a name field (accent border) at the top of the selected folder, or of the
     selected file's folder, or of the root. Enter creates it (`a/b.txt` also makes the folders),
     Escape or clicking away cancels, and a taken name shows "Already exists" in red under the field.
-    A new file opens in the editor.
+    A new file opens in the editor. The active file is revealed: its folders open, its row is
+    selected and scrolled into view (also from the "Reveal in Explorer" button above the editor).
   - **Search** (Ctrl+Shift+F in the Editor, or "Search in files" in the palette): a search field
     with three toggles inside (Aa match case, ab whole word, .* regular expression), and under a
     chevron "files to include" and "files to exclude" (comma-separated: `*.ts, src/api`,
@@ -57,6 +58,14 @@ the space you are in, on this computer or on an ssh machine.
   machine, files are read with `readTextFile(path, {on})`, git runs through `exec(..., {on})`, and saves go
   through `exec` as chunked base64 (`sh`, or PowerShell when the remote has no `sh`), size-checked
   before the file is replaced.
+- **Ctrl+P** (Go to file): a 600 px box at the top center with a field and up to 60 files. With no
+  text, open files come first. Typing fuzzy-matches the repo's files (`git ls-files` tracked +
+  untracked, or the folder's text files outside a repo), preferring the file name, runs and word
+  starts; matched letters are accent and bold, the folder is dim. ↑/↓ move, Enter or a click opens,
+  Esc or a click outside closes, `name:42` opens at line 42.
+- **Ctrl+ù** (and Ctrl+/) toggles a line comment on the line or the selected lines: `//`, `#`, `--`,
+  `<!-- -->` or `/* */` by file type, at the lines' common indent; all commented lines are
+  uncommented instead.
 - Keys while the Editor has focus: Ctrl+S save, Ctrl+W or Ctrl+F4 close the open file (not the
   tab), Ctrl+B toggle the sidebar. Showing the tab focuses the active document automatically, so
   Ctrl+F4 works right after opening.
@@ -80,8 +89,9 @@ the space you are in, on this computer or on an ssh machine.
 - `mods/code/main.js` (the `View`), `git.js` (git commands, diff rows, graph lanes, file trees),
   `icons.js` (file-type badges), `langs.js` (file name to syntax), plus lucide-style SVG icons.
 - `mod.json`: `"place": "none"`, `"focusable": true`, palette entries "Open editor" (`tab.new` with
-  `mod: "code"`), "Git: Pull" (`code.pull`) and "Search in files" (`code.search`).
-- `keys.json`: the global Ctrl+Shift+Y and the `mod:code` section (Ctrl+Shift+F is `code.search` there).
+  `mod: "code"`), "Git: Pull" (`code.pull`), "Search in files" (`code.search`), "Go to file…"
+  (`code.quickopen`) and "Toggle line comment" (`code.comment`).
+- `keys.json`: the global Ctrl+Shift+Y and the `mod:code` section (Ctrl+Shift+F `code.search`, Ctrl+P `code.quickopen`, Ctrl+ù and Ctrl+/ `code.comment`).
 - gpui-base: `Editor`/`EditorState`, `Input`/`InputState`, `v_virtual_list` for long lists and the
   graph.
 

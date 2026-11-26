@@ -19,6 +19,16 @@
       "title": "Search in files",
       "command": "code.search",
       "words": "find grep editor codebase"
+    },
+    {
+      "title": "Go to file…",
+      "command": "code.quickopen",
+      "words": "quick open ctrl+p find file editor"
+    },
+    {
+      "title": "Toggle line comment",
+      "command": "code.comment",
+      "words": "comment editor ctrl+/"
     }
   ],
   "focusable": true

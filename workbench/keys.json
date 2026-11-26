@@ -16,6 +16,9 @@
     "ctrl-w": "code.close",
     "ctrl-f4": "code.close",
     "ctrl-b": "code.explorer",
-    "ctrl-shift-f": "code.search"
+    "ctrl-shift-f": "code.search",
+    "ctrl-p": "code.quickopen",
+    "ctrl-ù": "code.comment",
+    "ctrl-/": "code.comment"
   }
 }
