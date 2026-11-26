@@ -912,7 +912,8 @@ export default class Code extends View {
       .child(svg(`mods/code/${icon}.svg`).size(14));
   }
 
-  // Changed files as a tree (folders folded "a/b/c") or a flat list; click opens the diff.
+  // Changed files as a tree (folders folded "a/b/c") or a flat list; click opens the diff,
+  // Ctrl+click (Cmd+click) opens the file itself as it is now.
   // opts: { actions(f) -> buttons shown on hover, menu(f) -> [{label, run, danger}] for the ⋯ menu, flat }
   changeTree(t, prefix, files, makeDiff, opts = {}) {
     const rows = [], active = this.docs[this.active];
@@ -923,7 +924,12 @@ export default class Code extends View {
       rows.push(h_flex().id(id).h(24).flex_none().pl(8 + depth * 14).pr(6).gap(4).items_center().rounded(5).cursor_pointer()
         .bg(selected || menuOpen ? t.selected : t.chrome).hover(s => s.bg(selected ? t.selected : t.hover))
         .on_hover((on, cx) => { if (on) this.hover = id; else if (this.hover === id) this.hover = null; cx.notify(); })
-        .on_click((e, cx) => this.openDiff(spec, cx, e.click_count >= 2))
+        .tooltip(f.status === "D" ? f.path : `${f.path}  ·  Ctrl+click opens the file`)
+        .on_click((e, cx) => {
+          const m = e.modifiers ?? {};
+          if ((m.control || m.platform) && f.status !== "D" && this.repo) this.open(`${this.repo.root}/${f.path}`, this.repo.on, cx, true);
+          else this.openDiff(spec, cx, e.click_count >= 2);
+        })
         .when(!opts.flat, el => el.child(div().w(11).flex_none()))
         .child(this.badge(f.name))
         .child(h_flex().flex_1().min_w(0).gap(6).items_center()
@@ -1473,7 +1479,9 @@ export default class Code extends View {
           .when(Boolean(c.info), el => el.child(div().text_color(t.muted).child(`↑${c.info.ahead} ↓${c.info.behind}`)))
           .when(c.loading, el => el.child(div().text_color(t.dim).child("loading…")))))
       .child(v_flex().id("cmp-tree").flex_1().min_h(0).overflow_y_scrollbar().px(4).pb(6).text_size(13)
-        .children(c.from ? this.changeTree(t, "c", c.files, f => ({ from: c.from, to: c.to, path: f.path, status: f.status })) : [])
+        .children(c.from ? this.changeTree(t, "c", c.files, f => ({ from: c.from, to: c.to, path: f.path, status: f.status }), {
+          actions: f => f.status !== "D" && this.repo ? [this.iconBtn(t, `c-open-${f.path}`, "file", "Open file",
+            cx => this.open(`${this.repo.root}/${f.path}`, this.repo.on, cx, true))] : [] }) : [])
         .when(!c.files.length && !c.loading, el => el.child(div().p(10).text_size(12).text_color(c.error ? t.ansi1 : t.dim)
           .child(c.error || (live ? "No differences (including uncommitted changes)" : "No differences")))));
   }
@@ -1652,7 +1660,11 @@ export default class Code extends View {
     return v_flex().flex_1().min_h(0)
       .child(h_flex().h(38).flex_none().px(12).gap(8).items_center().border_b(1).border_color(t.border).bg(t.surface)
         .child(this.badge(base(doc.path), 10))
-        .child(h_flex().min_w(0).flex_shrink(1).child(div().truncate().text_color(t.dim).child(dir)).child(div().flex_none().font_weight(600).child(base(doc.path))))
+        .child(h_flex().id("diff-name").min_w(0).flex_shrink(1).rounded(4).px(2)
+          .when(doc.status !== "D", el => el.cursor_pointer().hover(s => s.bg(t.hover)).tooltip("Open the file")
+            .on_click((_e, cx) => this.open(`${doc.repo.root}/${doc.path}`, doc.repo.on, cx, true)))
+          .child(div().truncate().text_color(t.dim).child(dir)).child(div().flex_none().font_weight(600).child(base(doc.path))))
+        .when(doc.status !== "D", el => el.child(this.btn(t, "open-file", "Open file", cx => this.open(`${doc.repo.root}/${doc.path}`, doc.repo.on, cx, true), { icon: "file", h: 24, px: 8 }).flex_none()))
         .child(div().px(6).py(1).rounded(4).text_size(10).bg(this.statusColor(t, doc.status) + "26").text_color(this.statusColor(t, doc.status)).child(STATUS[doc.status] ?? "Changed"))
         .child(div().text_size(11).text_color(t.dim).truncate().child(label))
         .child(div().flex_1())
@@ -1663,7 +1675,7 @@ export default class Code extends View {
         .child(h_flex().p(2).gap(2).rounded(7).bg(t.raised)
           .child(this.btn(t, "m-uni", "Unified", () => { this.split = false; this.persist(); }, { active: !this.split, h: 22, px: 8, bg: t.raised }))
           .child(this.btn(t, "m-split", "Split", () => { this.split = true; this.persist(); }, { active: this.split, h: 22, px: 8, bg: t.raised })))
-        .when(doc.status !== "D", el => el.child(this.btn(t, "open-file", "Open file", cx => this.open(`${doc.repo.root}/${doc.path}`, doc.repo.on, cx, true), { icon: "file", h: 26 }))))
+        )
       .child(doc.loading ? div().p(16).text_color(t.dim).child("Loading diff…")
         : doc.error ? div().p(16).text_color(t.ansi1).child(doc.error)
         : this.diffBody(t, doc));
