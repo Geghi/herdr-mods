@@ -26,8 +26,10 @@ the space you are in, on this computer or on an ssh machine.
     files changed since the merge base, with ahead/behind counts.
   - **History:** branch scope (current branch or all), then the commit list.
 - **Main area:** document tabs (files, diffs, the History graph) with an unsaved dot. Files open in a
-  code editor with syntax colors picked from the file name. Diffs have a unified/split switch, with
-  red and green line backgrounds and line numbers on both sides. History shows one row per commit:
+  code editor with syntax colors picked from the file name. Diffs have two switches in their header:
+  Changes / Full file (only the changed parts with 4 lines of context, or the whole file with the
+  changes marked, scrolled to the first change) and Unified / Split. Both are remembered. Red and
+  green line backgrounds, line numbers on both sides. History shows one row per commit:
   graph lanes, ref badges, subject, author and relative time. Clicking a commit lists its changed
   files as a tree, and each one opens as a diff.
 - **Status bar:** `Local` or `SSH: <machine>`, branch and "N changed"/"clean", the last message,

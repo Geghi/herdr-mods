@@ -125,8 +125,9 @@ export async function aheadBehind(git, base, head) {
 }
 
 // The unified diff of one file, as lines starting at the first hunk.
-export async function fileDiff(git, from, to, path) {
-  const out = await git(["diff", ...(to ? [from, to] : from ? [from] : []), "--no-ext-diff", "--no-textconv", "--no-color", "-U4", "--", path], 20000);
+// full: the whole file as context (one hunk), not just the changed parts.
+export async function fileDiff(git, from, to, path, full = false) {
+  const out = await git(["diff", ...(to ? [from, to] : from ? [from] : []), "--no-ext-diff", "--no-textconv", "--no-color", full ? "-U1000000" : "-U4", "--", path], 20000);
   const lines = out.replace(/\n$/, "").split("\n"), first = lines.findIndex(l => l.startsWith("@@"));
   if (first < 0) return /Binary files/.test(out) ? ["Binary file changed"] : ["No text changes"];
   return lines.slice(first);

@@ -105,7 +105,7 @@ export default class Code extends View {
     this.docs = []; this.active = -1; this.seen = 0;
     this.entries = new Map(); this.folders = new Set(); this.treeError = null;
     this.sidebar = true; this.message = null; this.view = "explorer";
-    this.collapsed = new Set(); this.split = false;
+    this.collapsed = new Set(); this.split = false; this.fullFile = false;
     this.repo = null;                                   // { root, on, current, base, list }
     this.work = { staged: [], unstaged: [], loading: false, error: null, hasHead: true, at: 0 };
     this.changesTree = true; this.sideW = 300; this.hover = null; this.rowMenu = null; this.confirm = null;
@@ -117,6 +117,7 @@ export default class Code extends View {
     this.pickerFilter = InputState.new({ placeholder: "Filter branches…" });
     this.pickerFilter.on("change", (_e, cx) => cx.notify());
     this.graphScroll = VirtualListScrollHandle.new();
+    this.diffScroll = VirtualListScrollHandle.new();
     this.handle = cx.focus_handle();
     this.branchMenu = false;
     this.branchFilter = InputState.new({ placeholder: "Switch to branch…" });
@@ -133,6 +134,7 @@ export default class Code extends View {
         if (saved.active >= 0) this.active = Math.min(saved.active, this.docs.length - 1);
         if (VIEWS.some(v => v.id === saved.view)) this.view = saved.view;
         this.split = Boolean(saved.split);
+        this.fullFile = Boolean(saved.fullFile);
         if (saved.sideW) this.sideW = saved.sideW;
         if (saved.changesTree === false) this.changesTree = false;
       }
@@ -183,7 +185,7 @@ export default class Code extends View {
       const cur = this.docs[this.active];
       localStorage.setItem(`session:${this.space}`, JSON.stringify({ root: this.root, on: this.on, folders: [...this.folders],
         docs: files.map(d => ({ path: d.path, on: d.on })), active: cur?.kind === "file" ? files.indexOf(cur) : -1,
-        view: this.view, split: this.split, sideW: this.sideW, changesTree: this.changesTree }));
+        view: this.view, split: this.split, fullFile: this.fullFile, sideW: this.sideW, changesTree: this.changesTree }));
     } catch {}
   }
 
@@ -425,20 +427,42 @@ export default class Code extends View {
     const preview = this.docs.findIndex(d => d.kind === "diff" && d.preview);
     if (preview >= 0 && !keep) { this.docs[preview] = doc; i = preview; } else { this.docs.push(doc); i = this.docs.length - 1; }
     this.active = i;
+    this.loadDiff(doc, cx);
+    cx.notify();
+  }
+
+  // Loads a diff doc in the current mode: only the changes, or the full file with the changes marked.
+  loadDiff(doc, cx) {
+    const { repo, from, to, path, untracked } = doc, full = this.fullFile;
+    doc.loading = true; doc.error = null; doc.full = full;
     cx.spawn(async cx => {
       try {
         let lines;
         if (untracked) {
           const text = await readTextFile(`${repo.root}/${path}`, { on: repo.on });
           lines = text === null ? ["File not found"] : text.includes("\0") ? ["Binary file"] : textAsAdded(text);
-        } else lines = await fileDiff(gitIn(repo.root, repo.on), from, to, path);
+        } else lines = await fileDiff(gitIn(repo.root, repo.on), from, to, path, full);
+        if (doc.full !== full) return; // the mode changed while loading; the newer load wins
         doc.rows = unifiedRows(lines); doc.split = splitRows(doc.rows);
         doc.add = doc.rows.filter(r => r.kind === "+").length; doc.del = doc.rows.filter(r => r.kind === "-").length;
         doc.longest = Math.max(20, ...doc.rows.map(r => r.text.length));
-      } catch (e) { doc.error = String(e.message ?? e); }
-      finally { doc.loading = false; cx.notify(); }
+        // Full file: start at the first change instead of line 1.
+        if (full && this.docs[this.active] === doc) this.scrollToChange(doc);
+      } catch (e) { if (doc.full === full) doc.error = String(e.message ?? e); }
+      finally { if (doc.full === full) { doc.loading = false; cx.notify(); } }
     });
-    cx.notify();
+  }
+
+  scrollToChange(doc) {
+    const rows = this.split ? doc.split : doc.rows;
+    const i = rows.findIndex(r => r.kind === "+" || r.kind === "-" || (r.kind === "pair" && (r.l?.kind === "-" || r.r?.kind === "+")));
+    if (i > 0) this.diffScroll.scroll_to_item(Math.max(0, i - 3), "top");
+  }
+
+  setFullFile(full, cx) {
+    if (this.fullFile === full) return;
+    this.fullFile = full; this.persist();
+    for (const d of this.docs) if (d.kind === "diff") this.loadDiff(d, cx);
   }
 
   // ---- branches ----
@@ -1002,7 +1026,7 @@ export default class Code extends View {
       : r.kind === "@" ? hunk(r) : div().w_full().h(rowH).px(12).text_color(t.dim).child(r.text);
     const rows = this.split ? doc.split : doc.rows;
     const list = v_virtual_list(`diff-${doc.key}-${this.split}`, rows.length, rowH, i => String(i),
-      range => this.safeRows(rows.slice(range.start, range.end), range.start, this.split ? splitRow : unifiedRow, t, rowH)).size_full();
+      range => this.safeRows(rows.slice(range.start, range.end), range.start, this.split ? splitRow : unifiedRow, t, rowH)).track_scroll(this.diffScroll).size_full();
     return div().flex_1().min_h(0).relative().font_family(mono()).text_size(size).bg(t.background)
       .child(this.split ? list
         : div().id(`diffx-${doc.key}`).size_full().overflow_x_scrollbar()
@@ -1023,6 +1047,9 @@ export default class Code extends View {
         .child(div().text_size(11).text_color(t.dim).truncate().child(label))
         .child(div().flex_1())
         .child(div().text_size(12).text_color(t.ansi2).child(`+${doc.add}`)).child(div().text_size(12).text_color(t.ansi1).child(`−${doc.del}`))
+        .child(h_flex().id("diff-mode").p(2).gap(2).rounded(7).bg(t.raised).tooltip("Show only the changed parts, or the whole file with the changes marked")
+          .child(this.btn(t, "m-changes", "Changes", cx => this.setFullFile(false, cx), { active: !this.fullFile, h: 22, px: 8, bg: t.raised }))
+          .child(this.btn(t, "m-full", "Full file", cx => this.setFullFile(true, cx), { active: this.fullFile, h: 22, px: 8, bg: t.raised })))
         .child(h_flex().p(2).gap(2).rounded(7).bg(t.raised)
           .child(this.btn(t, "m-uni", "Unified", () => { this.split = false; this.persist(); }, { active: !this.split, h: 22, px: 8, bg: t.raised }))
           .child(this.btn(t, "m-split", "Split", () => { this.split = true; this.persist(); }, { active: this.split, h: 22, px: 8, bg: t.raised })))
