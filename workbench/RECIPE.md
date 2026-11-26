@@ -51,6 +51,8 @@ the space you are in, on this computer or on an ssh machine.
   uncommitted changes that would be overwritten, get a plain explanation instead of git's error.
 - Open files that were not edited reload after a branch switch or a pull.
 - Sidebar width, view, tree/list mode and open files are kept per space.
+- `tab.new` props: `open` (a path or a list of paths, relative to the space folder) opens files, and
+  `view` (`explorer`, `changes`, `compare`, `graph`) picks the starting view.
 - Other mods can open a file in it: `setShared("code.open", {space, root, on, path, n: Date.now()})`, then select or
   create the Editor tab (see the files-to-editor mod).
 

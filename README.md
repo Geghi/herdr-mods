@@ -21,3 +21,5 @@ Clone the repo, link each `mods/<name>` folder into `~/.config/herdr-app/mods/` 
 Windows, a symlink on Linux), then run `sync/herdr-sync.ps1` or `sync/herdr-sync.sh` every few
 minutes. They commit local changes, `pull --rebase` and push. On a conflict they stop and write
 `sync/last-error.log` instead of pushing.
+
+The screenshots in each folder are taken from this repository.
