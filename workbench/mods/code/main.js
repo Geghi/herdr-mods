@@ -190,24 +190,7 @@ export default class Code extends View {
     this.newBranch.on("submit", (_e, cx) => this.createBranch(cx));
     if (checking()) return;
     this.dedupeUntil = props()?.dedupe ? Date.now() + 3000 : 0;
-    try {
-      const saved = JSON.parse(localStorage.getItem(`session:${this.space}`) || "null");
-      if (saved && (saved.on ?? null) === this.on) {
-        if (saved.root === this.root) this.folders = new Set(saved.folders ?? []);
-        for (const d of saved.docs ?? []) this.open(d.path, d.on ?? null, cx, false);
-        if (saved.active >= 0) this.active = Math.min(saved.active, this.docs.length - 1);
-        if (VIEWS.some(v => v.id === saved.view)) this.view = saved.view;
-        this.split = Boolean(saved.split);
-        this.fullFile = Boolean(saved.fullFile);
-        if (saved.sideW) this.sideW = saved.sideW;
-        if (saved.changesTree === false) this.changesTree = false;
-        if (saved.find) {
-          for (const k of ["matchCase", "word", "regex", "ignore", "details", "tree"]) if (typeof saved.find[k] === "boolean") this.grep[k] = saved.find[k];
-          if (saved.find.include) this.findInclude.set_value(saved.find.include);
-          if (saved.find.exclude) this.findExclude.set_value(saved.find.exclude);
-        }
-      }
-    } catch {}
+    this.restoreSession(cx);
     // tab.new props: open (a path or a list, relative to the space folder) and view.
     const p = props() ?? {};
     for (const f of [].concat(p.open ?? [])) this.open(/^([\\/]|[A-Za-z]:)/.test(f) ? f : `${this.root}/${f}`, this.on, cx, false);
@@ -239,6 +222,28 @@ export default class Code extends View {
         cx.notify();
       }
     });
+  }
+
+  // Reopens what this space had open (files, view, options), saved by persist().
+  restoreSession(cx) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(`session:${this.space}`) || "null");
+      if (saved && (saved.on ?? null) === this.on) {
+        if (saved.root === this.root) this.folders = new Set(saved.folders ?? []);
+        for (const d of saved.docs ?? []) this.open(d.path, d.on ?? null, cx, false);
+        if (saved.active >= 0) this.active = Math.min(saved.active, this.docs.length - 1);
+        if (VIEWS.some(v => v.id === saved.view)) this.view = saved.view;
+        this.split = Boolean(saved.split);
+        this.fullFile = Boolean(saved.fullFile);
+        if (saved.sideW) this.sideW = saved.sideW;
+        if (saved.changesTree === false) this.changesTree = false;
+        if (saved.find) {
+          for (const k of ["matchCase", "word", "regex", "ignore", "details", "tree"]) if (typeof saved.find[k] === "boolean") this.grep[k] = saved.find[k];
+          if (saved.find.include) this.findInclude.set_value(saved.find.include);
+          if (saved.find.exclude) this.findExclude.set_value(saved.find.exclude);
+        }
+      }
+    } catch {}
   }
 
   spaceFolder() {
@@ -1873,6 +1878,34 @@ export default class Code extends View {
 ${e?.stack ?? ""}`); }
   }
 
+  // A copy can't ask which tab it's in, and init (app start, every hot reload) takes the space
+  // that's active then, often another one. Drawn means shown: the shown tab's Editor is this copy,
+  // so when the focused tab holds an Editor and belongs to another space, move over to that space.
+  followOwnSpace(cx) {
+    const f = focused();
+    if (!f?.tab || this.rebinding) return;
+    if (!panes().some(p => p.tab === f.tab && p.mod === "code")) return;
+    const sp = spaces().find(s => s.tabs.some(tb => tb.id === f.tab));
+    if (!sp || sp.id === this.space) return;
+    this.rebinding = true;
+    cx.spawn(async cx => {
+      try {
+        // Keep unsaved files; the rest is the other space's and goes.
+        for (const d of this.docs) if (!(d.kind === "file" && d.dirty)) d.state?.release();
+        this.docs = this.docs.filter(d => d.kind === "file" && d.dirty);
+        this.active = this.docs.length - 1;
+        this.space = sp.id; this.on = sp.machine ?? null; this.root = this.spaceFolder();
+        this.creating = null; this.treeSel = null; this.repo = null; this.work.note = null;
+        this.folders = new Set(); this.entries = new Map(); this.revealedDoc = null;
+        this.work = { ...this.work, staged: [], unstaged: [], sync: null, error: null, at: 0 };
+        this.graph = { ...this.graph, commits: [], layout: null, selected: null, detail: null };
+        this.restoreSession(cx);
+        this.loadTree(cx); this.loadRepo(cx);
+        this.persist();
+      } finally { this.rebinding = false; cx.notify(); }
+    });
+  }
+
   // When this Editor tab becomes the shown one (opened, or switched to), take the keyboard,
   // so editor keys (Ctrl+F4, Ctrl+S, Ctrl+W) work without clicking inside first.
   autoFocus(cx) {
@@ -1892,7 +1925,7 @@ ${e?.stack ?? ""}`); }
 
   renderInner(cx) {
     if (this.dedupe()) return div();
-    if (!checking()) this.autoFocus(cx);
+    if (!checking()) { this.autoFocus(cx); this.followOwnSpace(cx); }
     this.takeRequest(cx);
     const t = theme(), doc = this.docs[this.active];
     if (doc !== this.revealedDoc) { this.revealedDoc = doc; if (doc?.kind === "file") this.reveal(doc, cx); }

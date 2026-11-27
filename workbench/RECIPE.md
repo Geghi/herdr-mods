@@ -110,6 +110,9 @@ the space you are in, on this computer or on an ssh machine.
 - Syntax colors come from herdr's built-in grammars (Sublime defaults). TypeScript, TOML, .env and
   Dockerfile have no grammar there, so they use the closest one (JS, YAML, shell).
 - Rows in a `v_virtual_list` can't use `on_click`; use the list's `on_item_click`.
+- A copy can't ask which tab it's in, and `init` (app start, every hot reload) runs while some other
+  space may be active. So on every render, if the focused tab holds a `code` pane and belongs to
+  another space, the copy moves to that space (keeps unsaved files, restores that space's session).
 - Write `mod.json` before `main.js` when installing, or herdr docks the mod into the layout.
 - Pull is `fetch` then `git pull --no-edit`, with `--no-rebase` unless the person set `pull.rebase`
   (VS Code's behaviour; never stuck on git's "divergent branches" question). Sync = fetch, pull if
