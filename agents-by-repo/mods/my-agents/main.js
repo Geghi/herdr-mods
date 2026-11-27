@@ -248,7 +248,7 @@ export default class Agents extends View {
       .pl(39)
       .pr(8)
       .rounded(8)
-      .h(26)
+      .h(22)
       .flex_none()
       .gap(0)
       .items_center()
@@ -327,11 +327,16 @@ export default class Agents extends View {
     // Alt+Up/Down follow exactly what the list shows.
     setAgentOrder(list.map((a) => a.address));
 
-    const withKids = (a, i) => {
+    // Tree guides: one thin vertical line per level in front of a row.
+    const nest = (depth, el) => depth <= 0 ? el : h_flex().flex_none().items_stretch()
+      .children(Array.from({ length: depth }, () => div().w(12).flex_none().flex().justify_center()
+        .child(div().w(1).h_full().bg(t.border))))
+      .child(el.flex_1().min_w(0));
+    const withKids = (a, i, depth = 0, plain = false) => {
       const subs = collapsed ? [] : this.tree(all, a.address);
-      const r = row(a, i, subs);
+      const r = nest(depth, row(a, i, subs, plain));
       if (this.folded.has(a.address)) return [r];
-      return [r, ...subs.map((s) => this.subRow(t, s, shown, byPriority))];
+      return [r, ...subs.map((s) => nest(depth, this.subRow(t, s, shown, byPriority)))];
     };
 
     // The fold chevron; folded, the count too, colored by the most urgent one.
@@ -382,8 +387,8 @@ export default class Agents extends View {
       if (detail.get(a.address) == null && seen[`${a.space_name}\u0000`] > 1) detail.set(a.address, label(a));
     }
 
-    const row = (a, i, subs = []) => {
-      const pic = icon(a.program, 16, t.foreground);
+    const row = (a, i, subs = [], plain = false) => {
+      const pic = icon(a.program, 14, t.foreground);
       const more = detail.get(a.address);
       // An agent on another machine (`vps/t7`) says which.
       const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
@@ -429,7 +434,8 @@ export default class Agents extends View {
       const raw = label(a);
       const title = /^\d+$/.test(raw) ? `${a.program?.name || "Agent"} · tab ${raw}` : raw || a.program?.name || a.address;
       const branch = pane?.branch || sp?.branch || "";
-      const onBranch = Boolean(branch) && !/^(main|master)$/.test(branch);
+      // In the tree the branch is on the header above: the row says the tab or the agent's title.
+      const onBranch = !plain && Boolean(branch) && !/^(main|master)$/.test(branch);
       const name = onBranch ? branch : title;
       const folder = shortFolder(pane?.cwd || sp?.folder);
       const where = [onBranch ? title : "", a.space_name || "", branch ? `⎇ ${branch}` : "", folder].filter(Boolean).join("  ·  ");
@@ -437,11 +443,11 @@ export default class Agents extends View {
         .id(`ag-${a.address}`)
         .tooltip(where)
         .px(8)
-        .h(30)
+        .h(24)
         .flex_none()
         .rounded(8)
         .items_center()
-        .gap(9)
+        .gap(7)
         .when(a.focused, (el) => el.bg(t.selected))
         .cursor_pointer()
         .hover((s) => s.bg(t.hover))
@@ -459,7 +465,7 @@ export default class Agents extends View {
           })).child(pic)))
         .child(h_flex().flex_1().min_w(0).gap(5).items_center()
           .when(onBranch, el => el.child(svg("mods/workspace-chrome/branch.svg").size(12).flex_none().text_color(t.dim)))
-          .child(div().min_w(0).truncate().text_size(12.8).text_color(idle ? t.muted : t.foreground).child(name)))
+          .child(div().min_w(0).truncate().text_size(12.5).text_color(idle ? t.muted : t.foreground).child(name)))
         .when(subs.length > 0, el => el.child(fold(a, subs)))
         .when(this.hovered === a.address, el => el.child(pin))
         .when(this.hovered !== a.address && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
@@ -479,22 +485,22 @@ export default class Agents extends View {
 
     // A group's header; it folds the group. Folded, it says how many and the most urgent state.
     // A space's header: folds it; shows the space, its branch and machine, the active one marked.
-    const header = (g) => {
+    const header = (g, multi = false) => {
       const open = !this.folded.has(g.id);
       const top = g.members.reduce((m, a) => ((RANK[a.status] ?? 0) > (RANK[m] ?? 0) ? a.status : m), null);
       const sp = g.space, active = Boolean(g.active ?? sp?.active), machine = sp?.machine ?? null;
-      const branch = sp?.branch && sp.branch !== g.label ? sp.branch : null;
+      const branch = !multi && sp?.branch && sp.branch !== g.label ? sp.branch : null;
       return h_flex()
         .id(g.id)
-        .mt(6)
+        .mt(3)
         .px(6)
-        .h(28)
+        .h(23)
         .flex_none()
         .gap(6)
         .items_center()
         .rounded(6)
-        .text_size(11.5)
-        .font_medium()
+        .text_size(12.5)
+        .font_semibold()
         .cursor_pointer()
         .when(active, (el) => el.bg(t.raised))
         .hover((s) => s.bg(t.hover))
@@ -503,9 +509,9 @@ export default class Agents extends View {
           cx.notify();
         })
         .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(10).flex_none().text_color(t.dim))
-        .when(active, (el) => el.child(div().size(6).flex_none().rounded(3).bg(t.accent)))
-        .child(div().min_w(0).truncate().text_color(active ? t.foreground : t.muted).child(g.label))
-        .child(div().min_w(0).flex_1().truncate().font_normal().text_color(t.dim).child(branch ? `⎇ ${branch}` : ""))
+        .child(svg("mods/workspace-chrome/folder.svg").size(13).flex_none().text_color(active ? t.accent : t.muted))
+        .child(div().min_w(0).truncate().text_color(t.foreground).child(g.label))
+        .child(div().min_w(0).flex_1().truncate().font_normal().text_size(11.5).text_color(t.dim).child(branch ? `⎇ ${branch}` : ""))
         .child(div().flex_none().text_color(t.dim).font_normal().child(String(g.members.length)))
         .when(!open && top && top !== "idle", (el) => el.child(this.status(t, { status: top }, true)));
     };
@@ -514,11 +520,11 @@ export default class Agents extends View {
       const id = `machine-${m ?? "local"}`, open = !this.folded.has(id);
       const count = gs.reduce((n, g) => n + g.members.length, 0);
       const top = gs.flatMap((g) => g.members).reduce((x, a) => ((RANK[a.status] ?? 0) > (RANK[x] ?? 0) ? a.status : x), null);
-      return h_flex().id(id).mt(10).px(6).h(24).flex_none().gap(6).items_center().rounded(6).cursor_pointer()
-        .text_size(10.5).font_weight(700).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
+      return h_flex().id(id).mt(4).px(6).h(19).flex_none().gap(6).items_center().rounded(6).cursor_pointer()
+        .text_size(10).font_weight(700).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
         .on_click((_e, cx) => { open ? this.folded.add(id) : this.folded.delete(id); cx.notify(); })
         .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(10).flex_none())
-        .child(div().w(7).h(7).flex_none().rounded(4).bg(m === null ? t.ansi2 : t.ansi4))
+        .child(div().w(6).h(6).flex_none().rounded(3).bg(m === null ? t.ansi2 : t.ansi4))
         .child(div().min_w(0).flex_1().truncate().child((m === null ? "THIS COMPUTER" : m).toUpperCase()))
         .child(div().flex_none().font_normal().child(String(count)))
         .when(!open && top && top !== "idle", (el) => el.child(this.status(t, { status: top }, true)));
@@ -529,11 +535,59 @@ export default class Agents extends View {
       const last = byMachine[byMachine.length - 1];
       if (last && last.m === m) last.gs.push(g); else byMachine.push({ m, gs: [g] });
     }
-    const projectRows = (g) => [header(g), ...(this.folded.has(g.id) ? [] : g.members.flatMap(withKids))];
+    const topOf = (ms) => ms.reduce((m, a) => ((RANK[a.status] ?? 0) > (RANK[m] ?? 0) ? a.status : m), null);
+    // A level under a project (a worktree/space, a tab with several agents): folds what's under it.
+    const subHeader = (id, iconName, label, tip, ms, active, small) => {
+      const open = !this.folded.has(id), top = topOf(ms);
+      return h_flex().id(id).h(small ? 19 : 21).mt(small ? 0 : 1).px(6).flex_none().gap(6).items_center().rounded(6).cursor_pointer()
+        .text_size(small ? 11 : 12).when(!small, (el) => el.font_medium())
+        .when(active, (el) => el.bg(t.raised)).hover((s) => s.bg(t.hover))
+        .when(Boolean(tip), (el) => el.tooltip(tip))
+        .on_click((_e, cx) => { open ? this.folded.add(id) : this.folded.delete(id); cx.notify(); })
+        .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(9).flex_none().text_color(t.dim))
+        .child(svg(`mods/workspace-chrome/${iconName}.svg`).size(small ? 11 : 12).flex_none().text_color(active ? t.accent : t.dim))
+        .child(div().min_w(0).flex_1().truncate().text_color(small ? t.dim : active ? t.foreground : t.muted).child(label))
+        .child(div().flex_none().text_size(11).text_color(t.dim).child(String(ms.length)))
+        .when(!open && top && top !== "idle", (el) => el.child(this.status(t, { status: top }, true)));
+    };
+    // Agents of one space: a tab with several agents gets its own level, a lone agent sits directly.
+    const tabRows = (ms, depth) => {
+      const byTab = new Map();
+      for (const a of ms) { if (!byTab.has(a.tab)) byTab.set(a.tab, []); byTab.get(a.tab).push(a); }
+      return [...byTab.entries()].flatMap(([tabId, tms]) => {
+        if (tms.length < 2) return tms.flatMap((a) => withKids(a, 0, depth, true));
+        const id = `tab-${tabId}`, tab = tabs.get(tabId);
+        const name = !tab ? "Tab" : /^\d+$/.test(tab.name) ? `Tab ${tab.name}` : tab.name;
+        return [nest(depth, subHeader(id, "terminal", name, null, tms, false, true)),
+          ...(this.folded.has(id) ? [] : tms.flatMap((a) => withKids(a, 0, depth + 1, true)))];
+      });
+    };
+    // Project > space (main checkout or a worktree, only when there are several) > tab > agent.
+    // b: the levels above the project (1 under a machine header, 0 when there is only one machine).
+    const projectRows = (g, b = 0) => {
+      if (g.id === "pinned") return [header(g), ...(this.folded.has(g.id) ? [] : g.members.flatMap((a) => withKids(a, 0, 1)))];
+      const bySp = new Map();
+      for (const a of g.members) { if (!bySp.has(a.space)) bySp.set(a.space, []); bySp.get(a.space).push(a); }
+      const multi = bySp.size > 1 || (bySp.size === 1 && g.mainId && !bySp.has(g.mainId));
+      const out = [nest(b, header(g, multi))];
+      if (this.folded.has(g.id)) return out;
+      if (!multi) return [...out, ...tabRows(g.members, b + 1)];
+      for (const [spId, ms] of bySp) {
+        const sp = spaceById.get(spId), id = `space-${spId}`;
+        const linked = Boolean(this.family.info.get(spId)?.linked);
+        const label = sp?.branch || sp?.name || ms[0]?.space_name || "";
+        const tip = [sp?.name, linked ? "worktree" : "main checkout", shortFolder(sp?.folder)].filter(Boolean).join("  ·  ");
+        out.push(nest(b + 1, subHeader(id, sp?.branch ? "branch" : "folder", label, tip, ms, Boolean(sp?.active), false)));
+        if (!this.folded.has(id)) out.push(...tabRows(ms, b + 2));
+      }
+      return out;
+    };
+    const oneMachine = new Set(byMachine.filter((x) => x.m !== "pinned").map((x) => x.m)).size <= 1;
     const rows = collapsed
-      ? list.flatMap(withKids)
-      : byMachine.flatMap(({ m, gs }) => m === "pinned" ? gs.flatMap(projectRows)
-        : [machineHeader(m, gs), ...(this.folded.has(`machine-${m ?? "local"}`) ? [] : gs.flatMap(projectRows))]);
+      ? list.flatMap((a, i) => withKids(a, i))
+      // One machine only: no machine header and one level less.
+      : byMachine.flatMap(({ m, gs }) => m === "pinned" || oneMachine ? gs.flatMap((g) => projectRows(g))
+        : [machineHeader(m, gs), ...(this.folded.has(`machine-${m ?? "local"}`) ? [] : gs.flatMap((g) => projectRows(g, 1)))]);
 
     return v_flex()
       .size_full()
