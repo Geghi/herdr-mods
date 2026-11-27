@@ -29,8 +29,11 @@ the space you are in, on this computer or on an ssh machine.
     count and each match as a row with ~16 characters before it, the match highlighted and the line
     number. Clicking a match opens the file with the match selected. Header buttons: search again,
     tree/list, collapse/expand all, clear. A selected word in the open file pre-fills the field.
-  - **Changes:** a commit message box, a Commit button (staged files only if any are staged, else
-    everything), and a ↓ Pull button (fast-forward only). Below them, STAGED CHANGES and CHANGES
+  - **Changes:** a commit message box and VS Code's one big button: ✓ Commit (staged files only if
+    any are staged, else everything) with a ▾ menu (Commit, Commit & Push, Commit & Sync); with no
+    changes it becomes ☁ Publish Branch (no upstream) or ⟳ Sync Changes ↓n ↑m (behind/ahead).
+    Under it a branch line: branch, ↓behind ↑ahead · upstream, and small Fetch / ↓ Pull / ↑ Push /
+    ⟳ Sync buttons. Below them, STAGED CHANGES and CHANGES
     sections, shown as a folder tree or a flat list. Each row shows a status letter (M/A/D/R/U)
     and +/− counts. Hovering a row shows open / discard / stage-or-unstage buttons. A ⋯ menu adds
     "Add to .gitignore", "Add folder to .gitignore", "Ignore all *.ext files", "Copy path" and
@@ -95,7 +98,7 @@ the space you are in, on this computer or on an ssh machine.
 - `mods/code/main.js` (the `View`), `git.js` (git commands, diff rows, graph lanes, file trees),
   `icons.js` (file-type badges), `langs.js` (file name to syntax), plus lucide-style SVG icons.
 - `mod.json`: `"place": "none"`, `"focusable": true`, palette entries "Open editor" (`tab.new` with
-  `mod: "code"`), "Git: Pull" (`code.pull`), "Search in files" (`code.search`), "Go to file…"
+  `mod: "code"`), "Git: Pull" / "Git: Push" / "Git: Sync (pull, then push)" / "Git: Fetch" (`code.pull`, `code.push`, `code.sync`, `code.fetch`), "Search in files" (`code.search`), "Go to file…"
   (`code.quickopen`) and "Toggle line comment" (`code.comment`).
 - `keys.json`: the global Ctrl+Shift+Y and the `mod:code` section (Ctrl+Shift+F `code.search`, Ctrl+P `code.quickopen`, Ctrl+ù and Ctrl+/ `code.comment`).
 - gpui-base: `Editor`/`EditorState`, `Input`/`InputState`, `v_virtual_list` for long lists and the
@@ -108,7 +111,12 @@ the space you are in, on this computer or on an ssh machine.
   Dockerfile have no grammar there, so they use the closest one (JS, YAML, shell).
 - Rows in a `v_virtual_list` can't use `on_click`; use the list's `on_item_click`.
 - Write `mod.json` before `main.js` when installing, or herdr docks the mod into the layout.
-- Pull is `git pull --ff-only`; diverged branches are refused with a message, never merged.
+- Pull is `fetch` then `git pull --no-edit`, with `--no-rebase` unless the person set `pull.rebase`
+  (VS Code's behaviour; never stuck on git's "divergent branches" question). Sync = fetch, pull if
+  behind, push if ahead. Push without an upstream publishes (`push -u <origin or first remote> HEAD`).
+  Ahead/behind come from `rev-list --left-right --count @{u}...HEAD`, refreshed with the changes list;
+  there's no auto-fetch, so incoming commits show after Fetch/Sync. Errors map to short reasons
+  (conflicts, rejected push, overlapping local changes, no upstream, auth).
 
 ## Done when
 

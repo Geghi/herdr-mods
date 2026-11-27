@@ -92,6 +92,34 @@ export async function pull(git) {
   await git(["pull", "--ff-only", "--no-rebase", "--no-autostash"], 90000);
 }
 
+// Where the branch stands against its upstream, like VS Code's status bar:
+// { branch (null when detached), upstream ("origin/main" or null), ahead, behind, remote (for publishing) }.
+export async function syncState(git) {
+  const branch = (await git(["symbolic-ref", "--short", "-q", "HEAD"]).catch(() => "")).trim() || null;
+  const upstream = (await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]).catch(() => "")).trim() || null;
+  const remotes = (await git(["remote"]).catch(() => "")).split("\n").map(s => s.trim()).filter(Boolean);
+  const remote = upstream ? remotes.find(r => upstream.startsWith(`${r}/`)) ?? remotes[0] ?? null : remotes.includes("origin") ? "origin" : remotes[0] ?? null;
+  if (!upstream) return { branch, upstream: null, ahead: 0, behind: 0, remote };
+  const [behind, ahead] = (await git(["rev-list", "--left-right", "--count", "@{u}...HEAD"]).catch(() => "0 0")).trim().split(/\s+/).map(Number);
+  return { branch, upstream, ahead: ahead || 0, behind: behind || 0, remote };
+}
+
+export async function fetchRemote(git) { await git(["fetch", "--prune"], 120000); }
+
+// Pull as VS Code does: the person's own pull.rebase if set, else a merge (never stuck on
+// git's "how to reconcile divergent branches" question).
+export async function pullMerge(git) {
+  const own = await git(["config", "--get", "pull.rebase"]).then(() => true, () => false);
+  await git(["pull", "--no-edit", ...(own ? [] : ["--no-rebase"])], 120000);
+}
+
+// Push; a branch without an upstream is published (push -u <remote> HEAD).
+export async function pushBranch(git, s) {
+  if (s.upstream) await git(["push"], 120000);
+  else if (s.remote) await git(["push", "-u", s.remote, "HEAD"], 120000);
+  else throw new Error("no remote configured");
+}
+
 export async function stage(git, paths) { if (paths.length) await git(["add", "-A", "--", ...paths]); }
 export async function unstage(git, paths, hasHead) {
   if (!paths.length) return;

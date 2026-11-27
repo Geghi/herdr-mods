@@ -3,7 +3,7 @@
 import { View, div, svg, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle, ScrollHandle } from "gpui-base";
 import { spaces, panes, focused, run, home, exec, readTextFile, writeTextFile, theme, settings, window as hwin, props, shared, nextCommand, checking } from "herdr";
-import { gitIn, repoRoot, branches, workingChanges, pull, stage, unstage, discard, changedFiles, mergeBase, aheadBehind, fileDiff, unifiedRows, splitRows, textAsAdded, commits, layoutGraph, buildTree, relTime, EMPTY_TREE } from "./git.js";
+import { gitIn, repoRoot, branches, workingChanges, syncState, fetchRemote, pullMerge, pushBranch, stage, unstage, discard, changedFiles, mergeBase, aheadBehind, fileDiff, unifiedRows, splitRows, textAsAdded, commits, layoutGraph, buildTree, relTime, EMPTY_TREE } from "./git.js";
 import { fileIcon } from "./icons.js";
 import { searchFiles, listFiles, fuzzy } from "./search.js";
 import { languageOf } from "./langs.js";
@@ -230,7 +230,7 @@ export default class Code extends View {
           const d = this.docs[this.active];
           if (d?.state && !this.docs.some(x => x.confirmClose)) d.state.focus(); else this.handle.focus();
         }
-        else if (c === "pull") this.pullBranch(cx);
+        else if (c === "pull" || c === "push" || c === "sync" || c === "fetch") this.remoteOp(c, cx);
         else if (c === "search") this.openSearch(cx);
         else if (c === "quickopen") this.openQuickOpen(cx);
         else if (c === "comment") this.toggleComment(cx);
@@ -307,9 +307,10 @@ export default class Code extends View {
     this.work.loading = true;
     cx.spawn(async cx => {
       try {
-        const r = await workingChanges(gitIn(repo.root, repo.on));
+        const git = gitIn(repo.root, repo.on);
+        const [r, sync] = await Promise.all([workingChanges(git), syncState(git).catch(() => null)]);
         if (this.repo !== repo) return;
-        this.work = { ...this.work, ...r, error: null };
+        this.work = { ...this.work, ...r, sync, error: null };
       } catch (e) {
         if (this.repo === repo) this.work.error = String(e.message ?? e);
       } finally {
@@ -323,59 +324,81 @@ export default class Code extends View {
     });
   }
 
-  commitAll(cx) {
+  // then: "push" or "sync" to go on after a successful commit (Commit & Push, Commit & Sync).
+  commitAll(cx, then = null) {
     const msg = this.commitMsg.value().trim();
-    if (!msg || !this.repo || this.work.busy || this.switching) return;
+    this.commitMenu = false;
+    if (!this.repo || this.work.busy || this.switching) return;
+    if (!msg) { this.work.note = "Write a commit message first."; this.commitMsg.focus(); cx.notify(); return; }
     const git = this.git(), stagedOnly = this.work.staged.length > 0;
     this.work.busy = "commit"; this.work.note = null; cx.notify();
     cx.spawn(async cx => {
+      let ok = false;
       try {
         if (!stagedOnly) await git(["add", "-A"]);
         await git(["commit", "-m", msg]);
         this.commitMsg.set_value("");
-        this.work.note = "Committed ✓";
+        this.work.note = "Committed ✓"; ok = true;
       } catch (e) { this.work.note = `Commit failed: ${String(e.message ?? e).slice(0, 200)}`; }
       finally { this.work.busy = false; this.loadWork(cx); this.loadRepo(cx); cx.notify(); }
+      if (ok && then) this.remoteOp(then, cx);
     });
   }
 
-  pullBranch(cx) {
+  // Fetch, Pull, Push, Sync (pull then push, as VS Code does) and Publish (push -u).
+  remoteOp(kind, cx) {
     if (!this.repo || this.work.busy || this.switching) return;
-    const git = this.git(), repo = this.repo;
-    const root = this.root, on = this.on;
-    const sameFolder = () => this.root === root && this.on === on;
-    this.work.busy = "pull";
-    this.view = "changes";
-    this.sidebar = true;
-    this.picker = null;
-    this.persist();
-    this.work.note = null;
-    this.rowMenu = null;
-    this.confirm = null;
+    const git = this.git(), root = this.root, on = this.on, repo = this.repo;
+    const same = () => this.root === root && this.on === on;
+    const NAME = { fetch: "Fetch", pull: "Pull", push: "Push", sync: "Sync", publish: "Publish" };
+    this.work.busy = kind; this.work.note = null; this.commitMenu = false; this.rowMenu = null; this.confirm = null;
     cx.spawn(async cx => {
+      let pulled = false;
       try {
-        await pull(git);
-        if (!sameFolder()) return;
-        this.work.note = "Pull complete.";
-        const prefix = repo.root.replace(/\\/g, "/").replace(/\/$/, "") + "/";
-        for (const [i, doc] of this.docs.entries()) {
-          if (doc.kind === "file" && doc.on === repo.on && doc.path.replace(/\\/g, "/").startsWith(prefix)) {
-            this.reload(i, cx, true);
+        let s = await syncState(git);
+        if (kind === "fetch") await fetchRemote(git);
+        if (kind === "pull" || kind === "sync") {
+          if (!s.upstream && kind === "pull") throw new Error("no tracking information");
+          if (s.upstream) {
+            await fetchRemote(git);
+            s = await syncState(git);
+            if (s.behind) { await pullMerge(git); pulled = true; }
           }
         }
-        this.loadTree(cx);
+        if (kind === "push" || kind === "sync" || kind === "publish") {
+          s = await syncState(git);
+          if (!s.branch) throw new Error("not currently on a branch");
+          if (!s.upstream || s.ahead) await pushBranch(git, s);
+        }
+        if (!same()) return;
+        s = await syncState(git).catch(() => s);
+        this.work.sync = s;
+        this.work.note = kind === "fetch" ? (s.behind ? `Fetched: ${s.behind} incoming commit${s.behind > 1 ? "s" : ""}` : "Fetched: up to date ✓")
+          : kind === "pull" ? (pulled ? "Pulled ✓" : "Already up to date ✓")
+          : kind === "publish" ? `Published to ${s.upstream ?? s.remote} ✓`
+          : kind === "push" ? "Pushed ✓" : "Synced ✓";
       } catch (e) {
-        if (sameFolder()) {
-          const detail = String(e.message ?? e);
-          const reason = /not possible to fast-forward|fast forward non possibile/i.test(detail) ? "The branches have diverged."
-            : /no tracking information|no such ref was fetched|not currently on a branch|non ci sono informazioni di tracciamento|non sei su un branch/i.test(detail) ? "Check that this branch tracks an upstream."
-            : /would be overwritten|sarebbero sovrascritt/i.test(detail) ? "Your local changes overlap with incoming changes."
-            : "Check your connection, Git credentials, and repository status.";
-          this.work.note = `Pull failed: ${reason}`;
+        if (same()) {
+          const d = String(e.message ?? e);
+          const reason = /CONFLICT|Automatic merge failed|could not apply/i.test(d) ? "merge conflicts. Fix the files marked U in Changes, then commit."
+            : /\[rejected\]|non-fast-forward|fetch first|failed to push some refs/i.test(d) ? "the remote has commits you don't have. Use Sync (pull, then push)."
+            : /would be overwritten|sarebbero sovrascritt/i.test(d) ? "your local changes overlap with incoming changes. Commit or stash them first."
+            : /no tracking information|non ci sono informazioni di tracciamento/i.test(d) ? "this branch has no upstream. Use Publish Branch."
+            : /not currently on a branch/i.test(d) ? "you're not on a branch (detached HEAD)."
+            : /no remote configured/i.test(d) ? "this repo has no remote."
+            : /Authentication|could not read Username|Permission denied|terminal prompts disabled/i.test(d) ? "Git couldn't log in to the remote. Check your credentials."
+            : d.split("\n").filter(Boolean).slice(-2).join(" ").slice(0, 200);
+          this.work.note = `${NAME[kind]} failed: ${reason}`;
         }
       } finally {
         this.work.busy = false;
-        if (sameFolder()) this.loadRepo(cx);
+        if (pulled && same()) {
+          const prefix = repo.root.replace(/\\/g, "/").replace(/\/$/, "") + "/";
+          for (const [i, doc] of this.docs.entries())
+            if (doc.kind === "file" && doc.on === repo.on && doc.path.replace(/\\/g, "/").startsWith(prefix)) this.reload(i, cx, true);
+          this.loadTree(cx);
+        }
+        if (same()) { this.loadWork(cx); this.loadRepo(cx); }
         cx.notify();
       }
     });
@@ -1396,6 +1419,34 @@ export default class Code extends View {
       ],
     }) : [];
     const c = this.confirm;
+    // VS Code's one big button: Commit while there are changes, else Publish Branch / Sync Changes.
+    const sy = w.sync, ahead = sy?.ahead ?? 0, behind = sy?.behind ?? 0;
+    const BUSY = { commit: "Committing…", fetch: "Fetching…", pull: "Pulling…", push: "Pushing…", sync: "Syncing…", publish: "Publishing…" };
+    const counts = `${behind ? ` ↓${behind}` : ""}${ahead ? ` ↑${ahead}` : ""}`;
+    const publish = !n && sy?.branch && !sy.upstream && sy.remote;
+    const syncNow = !n && sy?.upstream && (ahead || behind);
+    const mainAction = BUSY[busy] ? this.btn(t, "main-busy", BUSY[busy], () => {}, { h: 30 }).justify_center()
+      : publish ? this.btn(t, "publish", `☁ Publish Branch`, cx => this.remoteOp("publish", cx), { strong: true, h: 30 }).justify_center()
+        .tooltip(`Push ${sy.branch} to ${sy.remote} and track it`)
+      : syncNow ? this.btn(t, "sync-main", `⟳ Sync Changes${counts}`, cx => this.remoteOp("sync", cx), { strong: true, h: 30 }).justify_center()
+        .tooltip(`Pull ${behind} and push ${ahead} commit${ahead + behind === 1 ? "" : "s"} (${sy.upstream})`)
+      : h_flex().gap(1)
+        .child(this.btn(t, "commit", stagedOnly ? `✓ Commit ${w.staged.length} staged` : n ? `✓ Commit all ${n}` : "✓ Commit",
+          cx => this.commitAll(cx), { strong: canCommit, h: 30 }).flex_1().justify_center().rounded_r(0))
+        .child(this.btn(t, "commit-more", "▾", () => { this.commitMenu = !this.commitMenu; }, { strong: canCommit, h: 30, px: 9 }).rounded_l(0)
+          .tooltip("Commit & Push, Commit & Sync"));
+    const mini = (id, label, tip, kind) => div().id(id).h(20).px(6).flex().items_center().rounded(4).cursor_pointer().text_size(11)
+      .text_color(t.muted).hover(s => s.bg(t.raised).text_color(t.foreground)).tooltip(tip)
+      .on_click((_e, cx) => { this.remoteOp(kind, cx); cx.notify(); }).child(label);
+    const syncBar = !sy ? div() : h_flex().h(22).gap(4).items_center().text_size(11).text_color(t.dim)
+      .child(svg("mods/code/git-branch.svg").size(12).flex_none())
+      .child(div().flex_none().max_w(110).truncate().text_color(t.muted).child(sy.branch ?? "detached"))
+      .child(div().flex_1().min_w(0).truncate().child(sy.upstream ? `${counts.trim() || "✓"} · ${sy.upstream}` : sy.remote ? "not published" : "no remote"))
+      .when(Boolean(sy.remote), el => el
+        .child(mini("rm-fetch", "Fetch", "Fetch from the remote (changes nothing locally)", "fetch"))
+        .child(mini("rm-pull", `↓${behind || ""}`, "Pull", "pull"))
+        .child(mini("rm-push", `↑${ahead || ""}`, sy.upstream ? "Push" : "Publish branch", sy.upstream ? "push" : "publish"))
+        .child(mini("rm-sync", "⟳", "Sync: pull, then push", "sync")));
     return v_flex().flex_1().min_h(0)
       .child(this.section(t, "SOURCE CONTROL", [
         div().text_size(11).text_color(t.ansi2).child(`+${s.add}`), div().text_size(11).text_color(t.ansi1).child(`−${s.del}`),
@@ -1405,10 +1456,12 @@ export default class Code extends View {
         .child(div().h(32).px(10).flex().items_center().rounded(7).bg(t.background).border_1().border_color(t.border)
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .child(Input.new(this.commitMsg).h_full().w_full().text_size(12).text_color(t.foreground)))
-        .child(this.btn(t, "commit", busy === "commit" ? "Committing…" : stagedOnly ? `✓ Commit ${w.staged.length} staged` : n ? `✓ Commit all ${n}` : "✓ Commit",
-          cx => this.commitAll(cx), { strong: canCommit, h: 30 }).justify_center())
-        .child(this.btn(t, "pull", busy === "pull" ? "Pulling…" : "↓ Pull",
-          cx => this.pullBranch(cx), { h: 28 }).justify_center().tooltip("Pull from upstream (fast-forward only)"))
+        .child(mainAction)
+        .when(Boolean(this.commitMenu) && n > 0, el => el.child(v_flex().p(4).gap(1).rounded(7).bg(t.popover ?? t.raised).border_1().border_color(t.border)
+          .children([["Commit", null], ["Commit & Push", "push"], ["Commit & Sync", "sync"]].map(([label, then]) =>
+            h_flex().id(`cm-${label}`).h(26).px(8).items_center().rounded(5).cursor_pointer().text_size(12).text_color(t.foreground)
+              .hover(s => s.bg(t.hover)).on_click((_e, cx) => { this.commitAll(cx, then); cx.notify(); }).child(label)))))
+        .child(syncBar)
         .when(Boolean(w.note), el => el.child(div().text_size(11).text_color(/failed/.test(w.note ?? "") ? t.ansi1 : t.ansi2).child(w.note)))))
       .when(Boolean(c), el => el.child(v_flex().mx(10).mb(8).p(10).gap(6).flex_none().rounded(8).bg(t.ansi1 + "18").border_1().border_color(t.ansi1 + "66")
         .child(div().text_size(12).font_weight(600).child(c.title))

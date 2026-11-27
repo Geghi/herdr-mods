@@ -16,6 +16,21 @@
       "words": "editor source control update upstream"
     },
     {
+      "title": "Git: Push",
+      "command": "code.push",
+      "words": "editor source control upload publish"
+    },
+    {
+      "title": "Git: Sync (pull, then push)",
+      "command": "code.sync",
+      "words": "editor source control synchronize"
+    },
+    {
+      "title": "Git: Fetch",
+      "command": "code.fetch",
+      "words": "editor source control remote"
+    },
+    {
       "title": "Search in files",
       "command": "code.search",
       "words": "find grep editor codebase"
